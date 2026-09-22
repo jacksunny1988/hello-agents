@@ -1,14 +1,15 @@
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Literal
 import os
+from typing import Any
+
+from pydantic import BaseModel
+
 
 class Config(BaseModel):
-
     # LLM配置
     default_model: str = "gpt-3.5-turbo"
     default_provider: str = "openai"
     temperature: float = 0.7
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None
 
     # 系统配置
     debug: bool = False
@@ -24,9 +25,11 @@ class Config(BaseModel):
             debug=os.getenv("DEBUG", "false").lower() == "true",
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             temperature=float(os.getenv("TEMPERATURE", "0.7")),
-            max_tokens=int(os.getenv("MAX_TOKENS")) if os.getenv("MAX_TOKENS") else None,
+            max_tokens=int(os.getenv("MAX_TOKENS"))
+            if os.getenv("MAX_TOKENS")
+            else None,
         )
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return self.model_dump()

@@ -1,11 +1,13 @@
 import re
-from typing import Iterator, Optional, TYPE_CHECKING
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Optional
 
 from hello_agents.core import Agent, Config
 from hello_agents.core.llm import HelloAgentsLLM
 
 if TYPE_CHECKING:
     from hello_agents.tools.registry import ToolRegistry
+
 
 class SimpleAgent(Agent):
     """简单的对话Agent，支持可选的工具调用
@@ -15,12 +17,17 @@ class SimpleAgent(Agent):
     - Function Calling 工具调用（可选）
     - 自动多轮工具调用
     """
-    def __init__(self, name: str, llm_client: HelloAgentsLLM,
-                 system_prompt: Optional[str] = None,
-                  config: Optional[Config] = None,
-                  tool_registry: Optional['ToolRegistry'] = None,
-                  enable_tool_calling: bool = True,
-                  max_tool_iterations: int = 3):
+
+    def __init__(
+        self,
+        name: str,
+        llm_client: HelloAgentsLLM,
+        system_prompt: str | None = None,
+        config: Config | None = None,
+        tool_registry: Optional["ToolRegistry"] = None,
+        enable_tool_calling: bool = True,
+        max_tool_iterations: int = 3,
+    ):
         super().__init__(name, llm_client, config)
         self.system_prompt = system_prompt
         self.tool_registry = tool_registry
@@ -70,11 +77,17 @@ class SimpleAgent(Agent):
         tools_section += "\n## 工具调用格式\n"
         tools_section += "当需要使用工具时，请使用以下格式:\n"
         tools_section += "`[TOOL_CALL:{tool_name}:{parameters}]`\n"
-        tools_section += "例如:`[TOOL_CALL:search:Python编程]` 或 `[TOOL_CALL:calculator:2+2]`\n\n"
-        tools_section += "工具调用结果会自动插入到对话中，然后你可以基于结果继续回答。\n"
+        tools_section += (
+            "例如:`[TOOL_CALL:search:Python编程]` 或 `[TOOL_CALL:calculator:2+2]`\n\n"
+        )
+        tools_section += (
+            "工具调用结果会自动插入到对话中，然后你可以基于结果继续回答。\n"
+        )
         return base_prompt + tools_section
 
-    def _run_with_tools(self, messages: list, input_text: str, max_tool_iterations: int, **kwargs) -> str:
+    def _run_with_tools(
+        self, messages: list, input_text: str, max_tool_iterations: int, **kwargs
+    ) -> str:
         """支持工具调用的运行逻辑"""
         current_iteration = 0
         final_response = ""
@@ -93,17 +106,24 @@ class SimpleAgent(Agent):
                 clean_response = response
 
                 for call in tool_calls:
-                    result = self._execute_tool_call(call['tool_name'], call['parameters'])
+                    result = self._execute_tool_call(
+                        call["tool_name"], call["parameters"]
+                    )
                     tool_results.append(result)
                     # 从响应中移除工具调用标记
-                    clean_response = clean_response.replace(call['original'], "")
+                    clean_response = clean_response.replace(call["original"], "")
 
                 # 构建包含工具结果的消息
                 messages.append({"role": "assistant", "content": clean_response})
 
                 # 添加工具结果
                 tool_results_text = "\n\n".join(tool_results)
-                messages.append({"role": "user", "content": f"工具执行结果:\n{tool_results_text}\n\n请基于这些结果给出完整的回答。"})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"工具执行结果:\n{tool_results_text}\n\n请基于这些结果给出完整的回答。",
+                    }
+                )
 
                 current_iteration += 1
                 continue
@@ -125,27 +145,29 @@ class SimpleAgent(Agent):
 
     def _parse_tool_calls(self, text: str) -> list:
         """解析文本中的工具调用"""
-        pattern = r'\[TOOL_CALL:([^:]+):([^\]]+)\]'
+        pattern = r"\[TOOL_CALL:([^:]+):([^\]]+)\]"
         matches = re.findall(pattern, text)
 
         tool_calls = []
         for tool_name, parameters in matches:
-            tool_calls.append({
-                'tool_name': tool_name.strip(),
-                'parameters': parameters.strip(),
-                'original': f'[TOOL_CALL:{tool_name}:{parameters}]'
-            })
+            tool_calls.append(
+                {
+                    "tool_name": tool_name.strip(),
+                    "parameters": parameters.strip(),
+                    "original": f"[TOOL_CALL:{tool_name}:{parameters}]",
+                }
+            )
 
         return tool_calls
 
     def _execute_tool_call(self, tool_name: str, parameters: str) -> str:
         """执行工具调用"""
         if not self.tool_registry:
-            return f"❌ 错误:未配置工具注册表"
+            return "❌ 错误:未配置工具注册表"
 
         try:
             # 智能参数解析
-            if tool_name == 'calculator':
+            if tool_name == "calculator":
                 # 计算器工具直接传入表达式
                 result = self.tool_registry.execute_tool(tool_name, parameters)
             else:
@@ -159,33 +181,33 @@ class SimpleAgent(Agent):
             return f"🔧 工具 {tool_name} 执行结果:\n{result}"
 
         except Exception as e:
-            return f"❌ 工具调用失败:{str(e)}"
+            return f"❌ 工具调用失败:{e!s}"
 
     def _parse_tool_parameters(self, tool_name: str, parameters: str) -> dict:
         """智能解析工具参数"""
         param_dict = {}
 
-        if '=' in parameters:
+        if "=" in parameters:
             # 格式: key=value 或 action=search,query=Python
-            if ',' in parameters:
+            if "," in parameters:
                 # 多个参数:action=search,query=Python,limit=3
-                pairs = parameters.split(',')
+                pairs = parameters.split(",")
                 for pair in pairs:
-                    if '=' in pair:
-                        key, value = pair.split('=', 1)
+                    if "=" in pair:
+                        key, value = pair.split("=", 1)
                         param_dict[key.strip()] = value.strip()
             else:
                 # 单个参数:key=value
-                key, value = parameters.split('=', 1)
+                key, value = parameters.split("=", 1)
                 param_dict[key.strip()] = value.strip()
         else:
             # 直接传入参数，根据工具类型智能推断
-            if tool_name == 'search':
-                param_dict = {'query': parameters}
-            elif tool_name == 'memory':
-                param_dict = {'action': 'search', 'query': parameters}
+            if tool_name == "search":
+                param_dict = {"query": parameters}
+            elif tool_name == "memory":
+                param_dict = {"action": "search", "query": parameters}
             else:
-                param_dict = {'input': parameters}
+                param_dict = {"input": parameters}
 
         return param_dict
 
@@ -228,16 +250,17 @@ class SimpleAgent(Agent):
         self.add_message("assistant", full_response)
         print(f"✅ {self.name} 流式响应完成")
 
+
 # --- 客户端使用示例 ---
-if __name__ == '__main__':
-    from hello_agents.tools.registry import ToolRegistry
-    from hello_agents.tools.builtin.search import SearchTool
+if __name__ == "__main__":
     from hello_agents.tools.builtin.calculator import CalculatorTool
+    from hello_agents.tools.builtin.search import SearchTool
+    from hello_agents.tools.registry import ToolRegistry
 
     # 初始化工具注册表并注册工具
     tool_registry = ToolRegistry()
-    tool_registry.register_tool('search', SearchTool())
-    tool_registry.register_tool('calculator', CalculatorTool())
+    tool_registry.register_tool("search", SearchTool())
+    tool_registry.register_tool("calculator", CalculatorTool())
 
     # 初始化LLM客户端
     llm_client = HelloAgentsLLM()
@@ -250,7 +273,7 @@ if __name__ == '__main__':
         system_prompt="你是一个智能对话Agent，能够使用工具来回答问题。",
         tool_registry=tool_registry,
         enable_tool_calling=True,
-        max_tool_iterations=3
+        max_tool_iterations=3,
     )
 
     user_input = "请帮我搜索Python编程的最新趋势，并计算2+2的结果。"
@@ -260,14 +283,14 @@ if __name__ == '__main__':
     # 测试2:纯计算工具
     print("=== 测试2:纯计算工具 ===")
     calc_registry = ToolRegistry()
-    calc_registry.register_tool('calculator', CalculatorTool())
+    calc_registry.register_tool("calculator", CalculatorTool())
 
     calc_agent = SimpleAgent(
         name="计算助手",
         llm_client=llm_client,
         system_prompt="你是一个计算助手，专门帮用户进行数学计算。",
         tool_registry=calc_registry,
-        enable_tool_calling=True
+        enable_tool_calling=True,
     )
 
     response2 = calc_agent.run("请帮我计算 15 * 8 + 32")
@@ -279,7 +302,7 @@ if __name__ == '__main__':
         name="流式助手",
         llm_client=llm_client,
         system_prompt="你是一个友好的AI助手。",
-        enable_tool_calling=False
+        enable_tool_calling=False,
     )
 
     print("流式响应: ", end="")

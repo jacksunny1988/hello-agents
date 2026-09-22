@@ -5,6 +5,7 @@
 import ast
 import operator
 from typing import Any
+
 from ..base import BaseTool
 
 
@@ -19,7 +20,7 @@ class CalculatorTool(BaseTool):
         """初始化计算器工具"""
         super().__init__(
             name="calculator",
-            description="一个计算器工具，用于执行数学运算。支持加减乘除、取余、幂运算等。"
+            description="一个计算器工具，用于执行数学运算。支持加减乘除、取余、幂运算等。",
         )
         # 支持的运算符
         self.operators = {
@@ -48,7 +49,7 @@ class CalculatorTool(BaseTool):
             result = self._safe_eval(expression)
             return f"{expression} = {result}"
         except Exception as e:
-            return f"计算错误: {str(e)}"
+            return f"计算错误: {e!s}"
 
     def _safe_eval(self, expression: str) -> Any:
         """
@@ -65,7 +66,7 @@ class CalculatorTool(BaseTool):
 
         # 解析表达式为AST
         try:
-            tree = ast.parse(expression, mode='eval')
+            tree = ast.parse(expression, mode="eval")
         except SyntaxError:
             raise ValueError(f"无效的表达式: {expression}")
 
@@ -106,14 +107,14 @@ class CalculatorTool(BaseTool):
             elif isinstance(node.op, ast.UAdd):
                 return +self._eval_node(node.operand)
             else:
-                raise ValueError(f"不支持的一元运算符: {type(node.op).__name__}")
+                raise TypeError(f"不支持的一元运算符: {type(node.op).__name__}")
 
         else:
-            raise ValueError(f"不支持的表达式类型: {type(node).__name__}")
+            raise TypeError(f"不支持的表达式类型: {type(node).__name__}")
 
 
 # 使用示例
-if __name__ == '__main__':
+if __name__ == "__main__":
     calc = CalculatorTool()
     print(calc.run("2 + 3"))
     print(calc.run("10 * 5 - 3"))

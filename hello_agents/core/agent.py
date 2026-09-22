@@ -3,10 +3,11 @@ Agent基类 - 所有智能体的基础抽象类
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any
-from .message import Message, MessageRole
-from .llm import HelloAgentsLLM
+from typing import Any
+
 from .config import Config
+from .llm import HelloAgentsLLM
+from .message import Message, MessageRole
 
 
 class Agent(ABC):
@@ -21,8 +22,8 @@ class Agent(ABC):
         self,
         name: str,
         llm_client: HelloAgentsLLM,
-        config: Optional[Config] = None,
-        description: str = ""
+        config: Config | None = None,
+        description: str = "",
     ):
         """
         初始化智能体。
@@ -33,12 +34,12 @@ class Agent(ABC):
             config: 配置对象，可选
             description: 智能体描述
         """
-        self.system_prompt: Optional[str] = None
+        self.system_prompt: str | None = None
         self.name = name
         self.llm_client = llm_client
         self.config = config or Config()
         self.description = description
-        self._history: List[Message] = []
+        self._history: list[Message] = []
 
     @abstractmethod
     def run(self, task: str, **kwargs) -> Any:
@@ -52,14 +53,13 @@ class Agent(ABC):
         Returns:
             任务执行结果
         """
-        pass
 
     def add_message(self, role: MessageRole, content: str):
         """添加消息到历史记录"""
         message = Message(role=role, content=content)
         self._history.append(message)
 
-    def get_history(self) -> List[Message]:
+    def get_history(self) -> list[Message]:
         """获取历史消息列表"""
         return self._history.copy()
 

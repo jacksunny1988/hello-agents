@@ -7,14 +7,14 @@ __version__ = "0.1.0"
 __author__ = "jacksunny1988"
 
 from .core.agent import Agent
+from .core.config import Config
 from .core.llm import HelloAgentsLLM
 from .core.message import Message, MessageRole
-from .core.config import Config
 
 __all__ = [
     "Agent",
+    "Config",
     "HelloAgentsLLM",
     "Message",
     "MessageRole",
-    "Config",
 ]

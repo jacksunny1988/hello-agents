@@ -1,5 +1,5 @@
 import re
-from typing import Optional, List, Tuple
+
 from hello_agents.core import Agent, Config
 from hello_agents.core.llm import HelloAgentsLLM
 
@@ -46,16 +46,16 @@ class ReActAgent(Agent):
         name: str,
         llm_client: HelloAgentsLLM,
         tool_registry,
-        system_prompt: Optional[str] = None,
-        config: Optional[Config] = None,
+        system_prompt: str | None = None,
+        config: Config | None = None,
         max_steps: int = 5,
-        custom_prompt: Optional[str] = None
+        custom_prompt: str | None = None,
     ):
         super().__init__(name, llm_client, config)
         self.system_prompt = system_prompt
         self.tool_registry = tool_registry
         self.max_steps = max_steps
-        self.current_history: List[str] = []
+        self.current_history: list[str] = []
         self.prompt_template = custom_prompt if custom_prompt else MY_REACT_PROMPT
         print(f"✅ {name} 初始化完成，最大步数: {max_steps}")
 
@@ -74,9 +74,7 @@ class ReActAgent(Agent):
             tools_desc = self.tool_registry.get_tools_description()
             history_str = "\n".join(self.current_history)
             prompt = self.prompt_template.format(
-                tools=tools_desc,
-                question=input_text,
-                history=history_str
+                tools=tools_desc, question=input_text, history=history_str
             )
 
             # 2. 调用LLM
@@ -126,7 +124,7 @@ class ReActAgent(Agent):
         self.add_message("assistant", final_answer)
         return final_answer
 
-    def _parse_output(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+    def _parse_output(self, text: str) -> tuple[str | None, str | None]:
         """解析LLM输出，提取Thought和Action
 
         Args:
@@ -144,7 +142,7 @@ class ReActAgent(Agent):
         action = action_match.group(1).strip() if action_match else None
         return thought, action
 
-    def _parse_action(self, action_text: str) -> Tuple[Optional[str], Optional[str]]:
+    def _parse_action(self, action_text: str) -> tuple[str | None, str | None]:
         """解析Action，提取工具名和参数
 
         Args:
@@ -170,15 +168,15 @@ class ReActAgent(Agent):
 
 
 # --- 客户端使用示例 ---
-if __name__ == '__main__':
-    from hello_agents.tools.registry import ToolRegistry
-    from hello_agents.tools.builtin.search import SearchTool
+if __name__ == "__main__":
     from hello_agents.tools.builtin.calculator import CalculatorTool
+    from hello_agents.tools.builtin.search import SearchTool
+    from hello_agents.tools.registry import ToolRegistry
 
     # 初始化工具注册表并注册工具
     tool_registry = ToolRegistry()
-    tool_registry.register_tool('search', SearchTool())
-    tool_registry.register_tool('calculator', CalculatorTool())
+    tool_registry.register_tool("search", SearchTool())
+    tool_registry.register_tool("calculator", CalculatorTool())
 
     # 初始化LLM客户端
     llm_client = HelloAgentsLLM()
@@ -188,7 +186,7 @@ if __name__ == '__main__':
         name="ReAct助手",
         llm_client=llm_client,
         tool_registry=tool_registry,
-        max_steps=5
+        max_steps=5,
     )
 
     # 运行Agent

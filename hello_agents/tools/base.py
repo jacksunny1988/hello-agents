@@ -2,8 +2,23 @@
 工具基类 - 定义所有工具的基础接口
 """
 
+import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any
+
+from pydantic import BaseModel
+
+from hello_agents.tools.response import ToolResponse
+
+
+class ToolParameter(BaseModel):
+    """工具参数定义"""
+
+    name: str
+    type: str
+    description: str
+    required: bool = True
+    default: Any = None
 
 
 class BaseTool(ABC):
@@ -37,7 +52,25 @@ class BaseTool(ABC):
         Returns:
             工具执行结果
         """
-        pass
+
+    async def arun(self, parameters: dict[str, Any]) -> ToolResponse:
+        """异步执行工具
+
+        默认实现：在线程池中运行同步 run() 方法
+        子类可以重写此方法实现真正的异步执行
+
+        Args:
+            parameters: 工具参数字典
+
+        Returns:
+            ToolResponse: 标准化的工具响应对象
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self.run(parameters))
+
+    @abstractmethod
+    def get_parameters(self) -> list[ToolParameter]:
+        """获取工具参数定义"""
 
     def get_description(self) -> str:
         """获取工具描述"""

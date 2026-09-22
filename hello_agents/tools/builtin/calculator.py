@@ -6,7 +6,7 @@ import ast
 import operator
 from typing import Any
 
-from ..base import BaseTool
+from ..base import BaseTool, ToolParameter
 
 
 class CalculatorTool(BaseTool):
@@ -32,6 +32,17 @@ class CalculatorTool(BaseTool):
             ast.Mod: operator.mod,
             ast.Pow: operator.pow,
         }
+
+    def get_parameters(self) -> list[ToolParameter]:
+        """获取工具参数定义"""
+        return [
+            ToolParameter(
+                name="expression",
+                type="str",
+                description="数学表达式，如 '2 + 3 * 4'",
+                required=True,
+            )
+        ]
 
     def run(self, expression: str, **kwargs) -> str:
         """

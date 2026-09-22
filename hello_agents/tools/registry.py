@@ -28,10 +28,10 @@ class ToolRegistry:
             name: 工具名称
             tool: 工具实例
         """
-        if tool.name in self._tools:
-            print(f"⚠️ 警告:工具 '{tool.name}' 已存在，将被覆盖。")
-        self._tools[tool.name] = tool
-        print(f"✅ 工具 '{tool.name}' 已注册。")
+        if name in self.tools:
+            print(f"⚠️ 警告:工具 '{name}' 已存在，将被覆盖。")
+        self.tools[name] = tool
+        print(f"✅ 工具 '{name}' 已注册。")
 
     def register_function(
         self, name: str, description: str, func: Callable[[str], str]
@@ -78,9 +78,11 @@ class ToolRegistry:
             ValueError: 如果工具不存在
         """
         tool = self.get_tool(name)
-        if not tool:
-            raise ValueError(f"工具 '{name}' 未注册")
-        return tool.run(input_data, **kwargs)
+        if tool is not None:
+            return tool.run(input_data, **kwargs)
+        if name in self._functions:
+            return self._functions[name]["func"](input_data)
+        raise ValueError(f"工具 '{name}' 未注册")
 
     def get_tools_description(self) -> str:
         """
@@ -89,7 +91,7 @@ class ToolRegistry:
         Returns:
             工具描述字符串
         """
-        if not self.tools:
+        if not self.tools and not self._functions:
             return "暂无可用工具"
 
         descriptions = []
@@ -103,44 +105,48 @@ class ToolRegistry:
 
     def list_tools(self) -> list:
         """列出所有已注册的工具名称"""
-        return list(self.tools.keys())
+        return list(self.tools.keys()) + list(self._functions.keys())
 
-    def to_openai_schema(self) -> dict[str, Any]:
+    def to_openai_schema(self) -> list[dict[str, Any]]:
         """
-        转换为 OpenAI function calling schema 格式
+        将所有已注册工具转换为 OpenAI function calling schema 列表
 
         用于 FunctionCallAgent，使工具能够被 OpenAI 原生 function calling 使用
 
         Returns:
-            符合 OpenAI function calling 标准的 schema
+            符合 OpenAI function calling 标准的 schema 列表
         """
-        parameters = self.get_parameters()
-        # 构建 properties
-        properties = {}
-        required = []
-        for param in parameters:
-            prop = {"type": param.type, "description": param.description}
-            # 如果有默认值，添加到描述中（OpenAI schema 不支持 default 字段）
-            if param.default is not None:
-                prop["description"] = f"{param.description} (默认: {param.default})"
-            # 如果是数组类型，添加 items 定义
-            if param.type == "array":
-                prop["items"] = {"type": "string"}  # 默认字符串数组
-            if param.required:
-                required.append(param.name)
-        schema = {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
-        }
-        return schema
+        schemas: list[dict[str, Any]] = []
+        for name, tool in self.tools.items():
+            # 构建 properties
+            properties = {}
+            required = []
+            for param in tool.get_parameters():
+                prop = {"type": param.type, "description": param.description}
+                # 如果有默认值，添加到描述中（OpenAI schema 不支持 default 字段）
+                if param.default is not None:
+                    prop["description"] = f"{param.description} (默认: {param.default})"
+                # 如果是数组类型，添加 items 定义
+                if param.type == "array":
+                    prop["items"] = {"type": "string"}  # 默认字符串数组
+                properties[param.name] = prop
+                if param.required:
+                    required.append(param.name)
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool.get_description(),
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                            "required": required,
+                        },
+                    },
+                }
+            )
+        return schemas
 
     def __repr__(self) -> str:
         return f"ToolRegistry(tools={list(self.tools.keys())})"

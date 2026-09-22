@@ -14,9 +14,12 @@ class SearchTool(BaseTool):
     需要在环境变量中设置 SERPAPI_API_KEY。
     """
 
-    def __init__(self, backend: str="hybrid",
-                 tavily_key: str | None = None, 
-                 serpapi_key: str | None = None):
+    def __init__(
+        self,
+        backend: str = "hybrid",
+        tavily_key: str | None = None,
+        serpapi_key: str | None = None,
+    ):
         """
         初始化搜索工具。
 
@@ -25,7 +28,7 @@ class SearchTool(BaseTool):
         """
         super().__init__(
             name="search",
-            description="一个智能网页搜索引擎。支持混合搜索模式，自动选择最佳搜索源。"
+            description="一个智能网页搜索引擎。支持混合搜索模式，自动选择最佳搜索源。",
         )
         self.backend = backend
         self.tavily_key = tavily_key or os.getenv("TAVILY_API_KEY")
@@ -40,6 +43,7 @@ class SearchTool(BaseTool):
         if os.getenv("TAVILY_API_KEY"):
             try:
                 from tavily import TavilyClient
+
                 self.tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
                 self.search_sources.append("tavily")
                 print("✅ Tavily搜索源已启用")
@@ -50,6 +54,7 @@ class SearchTool(BaseTool):
         if os.getenv("SERPAPI_API_KEY"):
             try:
                 from serpapi import Client
+
                 self.search_sources.append("serpapi")
                 print("✅ SerpApi搜索源已启用")
             except ImportError:
@@ -58,7 +63,7 @@ class SearchTool(BaseTool):
         if self.search_sources:
             print(f"🔧 可用搜索源: {', '.join(self.search_sources)}")
         else:
-            print("⚠️ 没有可用的搜索源，请配置API密钥") 
+            print("⚠️ 没有可用的搜索源，请配置API密钥")
 
     def _search_with_serpapi(self, query: str) -> str:
         """
@@ -105,15 +110,12 @@ class SearchTool(BaseTool):
     def _search_tavily(self, query: str) -> str:
         """使用Tavily搜索"""
         response = self.tavily_client.search(
-            query=query,
-            search_depth="basic",
-            include_answer=True,
-            max_results=3
+            query=query, search_depth="basic", include_answer=True, max_results=3
         )
 
         result = f"🎯 Tavily AI搜索结果:{response.get('answer', '未找到直接答案')}\n\n"
 
-        for i, item in enumerate(response.get('results', [])[:3], 1):
+        for i, item in enumerate(response.get("results", [])[:3], 1):
             result += f"[{i}] {item.get('title', '')}\n"
             result += f"    {item.get('content', '')[:200]}...\n"
             result += f"    来源: {item.get('url', '')}\n\n"
@@ -166,6 +168,7 @@ class SearchTool(BaseTool):
             搜索结果字符串
         """
         return self._search_hybrid(query)
+
 
 # 使用示例
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
 from .base import BaseTool
 from .builtin.calculator import CalculatorTool
 from .builtin.search import SearchTool
+from .chain import ToolChain, ToolChainManager
 from .registry import ToolRegistry
 from .response import ToolResponse
 
@@ -12,6 +13,8 @@ __all__ = [
     "BaseTool",
     "CalculatorTool",
     "SearchTool",
+    "ToolChain",
+    "ToolChainManager",
     "ToolRegistry",
     "ToolResponse",
 ]

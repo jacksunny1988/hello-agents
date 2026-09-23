@@ -1,6 +1,6 @@
 import tiktoken
 from dataclasses import dataclass
-from typing import List,Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from ..core import Message
@@ -17,6 +17,7 @@ class ContextPacket:
         relevance_score: 相关性分数(0.0-1.0)
         metadata: 可选的元数据
     """
+
     content: str
     timestamp: datetime
     token_count: int
@@ -30,6 +31,7 @@ class ContextPacket:
         # 确保相关性分数在有效范围内
         self.relevance_score = max(0.0, min(1.0, self.relevance_score))
 
+
 @dataclass
 class ContextConfig:
     """上下文构建配置
@@ -42,6 +44,7 @@ class ContextConfig:
         recency_weight: 新近性权重(0.0-1.0)
         relevance_weight: 相关性权重(0.0-1.0)
     """
+
     max_tokens: int = 3000
     reserve_ratio: float = 0.2
     min_relevance: float = 0.1
@@ -53,8 +56,10 @@ class ContextConfig:
         """验证配置参数"""
         assert 0.0 <= self.reserve_ratio <= 1.0, "reserve_ratio 必须在 [0, 1] 范围内"
         assert 0.0 <= self.min_relevance <= 1.0, "min_relevance 必须在 [0, 1] 范围内"
-        assert abs(self.recency_weight + self.relevance_weight - 1.0) < 1e-6, \
+        assert abs(self.recency_weight + self.relevance_weight - 1.0) < 1e-6, (
             "recency_weight + relevance_weight 必须等于 1.0"
+        )
+
 
 class ContextBuilder:
     """上下文构建器
@@ -66,10 +71,13 @@ class ContextBuilder:
         self.config = config or ContextConfig()
         self.encoder = tiktoken.get_encoding("cl100k_base")  # 使用适当的编码器
 
-    def _gather(self, user_query: str,                
-                conversation_history: Optional[List[Message]] = None,
-                system_instructions: Optional[str] = None,
-                custom_packets: Optional[List[ContextPacket]] = None) -> List[ContextPacket]:
+    def _gather(
+        self,
+        user_query: str,
+        conversation_history: Optional[List[Message]] = None,
+        system_instructions: Optional[str] = None,
+        custom_packets: Optional[List[ContextPacket]] = None,
+    ) -> List[ContextPacket]:
         """汇集所有候选信息
 
         `Args:
@@ -84,22 +92,26 @@ class ContextBuilder:
         packets = []
         # 1. 添加系统指令(最高优先级,不参与评分)
         if system_instructions:
-            packets.append(ContextPacket(
-                content=system_instructions,
-                timestamp=datetime.now(),
-                token_count=len(self.encoder.encode(system_instructions)),
-                relevance_score=1.0,
-                metadata={"type": "system_instruction", "priority": "high"}
-            ))
+            packets.append(
+                ContextPacket(
+                    content=system_instructions,
+                    timestamp=datetime.now(),
+                    token_count=len(self.encoder.encode(system_instructions)),
+                    relevance_score=1.0,
+                    metadata={"type": "system_instruction", "priority": "high"},
+                )
+            )
         # 2. 从记忆系统检索相关记忆
         if self.memory_tool:
             try:
-                memory_results = self.memory_tool.run({
-                    "action": "search",
-                    "query": user_query,
-                    "limit": 10,
-                    "min_importance": 0.3
-                })
+                memory_results = self.memory_tool.run(
+                    {
+                        "action": "search",
+                        "query": user_query,
+                        "limit": 10,
+                        "min_importance": 0.3,
+                    }
+                )
                 # 解析记忆结果并转换为 ContextPacket
                 memory_packets = self._parse_memory_results(memory_results, user_query)
                 packets.extend(memory_packets)
@@ -109,12 +121,14 @@ class ContextBuilder:
         # 3. 从 RAG 系统检索相关知识
         if self.rag_tool:
             try:
-                rag_results = self.rag_tool.run({
-                    "action": "search",
-                    "query": user_query,
-                    "limit": 5,
-                    "min_score": 0.3
-                })
+                rag_results = self.rag_tool.run(
+                    {
+                        "action": "search",
+                        "query": user_query,
+                        "limit": 5,
+                        "min_score": 0.3,
+                    }
+                )
                 # 解析 RAG 结果并转换为 ContextPacket
                 rag_packets = self._parse_rag_results(rag_results, user_query)
                 packets.extend(rag_packets)
@@ -125,13 +139,17 @@ class ContextBuilder:
         if conversation_history:
             recent_history = conversation_history[-5:]  # 默认保留最近 5 条
             for msg in recent_history:
-                packets.append(ContextPacket(
-                    content=f"{msg.role}: {msg.content}",
-                    timestamp=msg.timestamp if hasattr(msg, 'timestamp') else datetime.now(),
-                    token_count=len(self.encoder.encode(msg.content)),
-                    relevance_score=0.6,  # 历史消息的基础相关性
-                    metadata={"type": "conversation_history", "role": msg.role}
-                ))
+                packets.append(
+                    ContextPacket(
+                        content=f"{msg.role}: {msg.content}",
+                        timestamp=msg.timestamp
+                        if hasattr(msg, "timestamp")
+                        else datetime.now(),
+                        token_count=len(self.encoder.encode(msg.content)),
+                        relevance_score=0.6,  # 历史消息的基础相关性
+                        metadata={"type": "conversation_history", "role": msg.role},
+                    )
+                )
         # 5. 添加自定义信息包
         if custom_packets:
             packets.extend(custom_packets)
@@ -139,10 +157,7 @@ class ContextBuilder:
         print(f"[ContextBuilder] 汇集了 {len(packets)} 个候选信息包")
 
     def _select(
-        self,
-        packets: List[ContextPacket],
-        user_query: str,
-        available_tokens: int
+        self, packets: List[ContextPacket], user_query: str, available_tokens: int
     ) -> List[ContextPacket]:
         """选择最相关的信息包
 
@@ -155,8 +170,12 @@ class ContextBuilder:
             List[ContextPacket]: 选中的信息包列表
         """
         # 1. 分离系统指令和其他信息
-        system_packets = [p for p in packets if p.metadata.get("type") == "system_instruction"]
-        other_packets = [p for p in packets if p.metadata.get("type") != "system_instruction"]
+        system_packets = [
+            p for p in packets if p.metadata.get("type") == "system_instruction"
+        ]
+        other_packets = [
+            p for p in packets if p.metadata.get("type") != "system_instruction"
+        ]
 
         # 2. 计算系统指令占用的 token
         system_tokens = sum(p.token_count for p in system_packets)
@@ -179,8 +198,8 @@ class ContextBuilder:
 
             # 综合分数 = 相关性权重 × 相关性 + 新近性权重 × 新近性
             combined_score = (
-                self.config.relevance_weight * packet.relevance_score +
-                self.config.recency_weight * recency
+                self.config.relevance_weight * packet.relevance_score
+                + self.config.recency_weight * recency
             )
 
             # 过滤低于最小相关性阈值的信息
@@ -194,7 +213,7 @@ class ContextBuilder:
         selected = system_packets.copy()
         current_tokens = system_tokens
 
-        for  packet in scored_packets:
+        for packet in scored_packets:
             if current_tokens + packet.token_count <= available_tokens:
                 selected.append(packet)
                 current_tokens += packet.token_count
@@ -202,7 +221,9 @@ class ContextBuilder:
                 # Token 预算已满,停止选择
                 break
 
-        print(f"[ContextBuilder] 选择了 {len(selected)} 个信息包,共 {current_tokens} tokens")
+        print(
+            f"[ContextBuilder] 选择了 {len(selected)} 个信息包,共 {current_tokens} tokens"
+        )
         return selected
 
     def _calculate_relevance(self, content: str, query: str) -> float:
@@ -299,33 +320,111 @@ class ContextBuilder:
 
         return "\n\n".join(sections)
 
+    def _compress(self, context: str, max_tokens: int) -> str:
+        """压缩超限的上下文
+
+        Args:
+            context: 原始上下文
+            max_tokens: 最大 token 限制
+
+        Returns:
+            str: 压缩后的上下文
+        """
+        current_tokens = self._count_tokens(context)
+
+        if current_tokens <= max_tokens:
+            return context  # 无需压缩
+
+        print(f"[ContextBuilder] 上下文超限({current_tokens} > {max_tokens}),执行压缩")
+
+        # 分区压缩:保持结构完整性
+        sections = context.split("\n\n")
+        compressed_sections = []
+        current_total = 0
+
+        for section in sections:
+            section_tokens = self._count_tokens(section)
+
+            if current_total + section_tokens <= max_tokens:
+                # 完整保留
+                compressed_sections.append(section)
+                current_total += section_tokens
+            else:
+                # 部分保留
+                remaining_tokens = max_tokens - current_total
+                if remaining_tokens > 50:  # 至少保留 50 tokens
+                    # 简单截断(生产环境中可以使用 LLM 摘要)
+                    truncated = self._truncate_text(section, remaining_tokens)
+                    compressed_sections.append(truncated + "\n[... 内容已压缩 ...]")
+                break
+
+        compressed_context = "\n\n".join(compressed_sections)
+        final_tokens = self._count_tokens(compressed_context)
+        print(f"[ContextBuilder] 压缩完成: {current_tokens} -> {final_tokens} tokens")
+
+        return compressed_context
+
+    def _truncate_text(self, text: str, max_tokens: int) -> str:
+        """截断文本到指定 token 数量
+
+        Args:
+            text: 原始文本
+            max_tokens: 最大 token 数量
+
+        Returns:
+            str: 截断后的文本
+        """
+        # 简单实现:按字符比例估算
+        # 生产环境中应该使用精确的 tokenizer
+        char_per_token = (
+            len(text) / self._count_tokens(text) if self._count_tokens(text) > 0 else 4
+        )
+        max_chars = int(max_tokens * char_per_token)
+
+        return text[:max_chars]
+
+    def _count_tokens(self, text: str) -> int:
+        """估算文本的 token 数量
+
+        Args:
+            text: 文本内容
+
+        Returns:
+            int: token 数量
+        """
+        # 简单估算:中文 1 字符 ≈ 1 token,英文 1 单词 ≈ 1.3 tokens
+        # 生产环境中应该使用实际的 tokenizer
+        chinese_chars = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        english_words = len([w for w in text.split() if w])
+
+        return int(chinese_chars + english_words * 1.3)
 
     def build(
         self,
         user_query: str,
         conversation_history: Optional[List[Message]] = None,
         system_instructions: Optional[str] = None,
-        additional_packets: Optional[List[ContextPacket]] = None
+        additional_packets: Optional[List[ContextPacket]] = None,
     ) -> str:
-         # 1. Gather: 收集候选信息
+        # 1. Gather: 收集候选信息
         packets = self._gather(
             user_query=user_query,
             conversation_history=conversation_history or [],
             system_instructions=system_instructions,
-            additional_packets=additional_packets or []
+            additional_packets=additional_packets or [],
         )
-        
+
         # 2. Select: 筛选与排序
         selected_packets = self._select(packets, user_query)
-        
+
         # 3. Structure: 组织成结构化模板
         structured_context = self._structure(
             selected_packets=selected_packets,
             user_query=user_query,
-            system_instructions=system_instructions
+            system_instructions=system_instructions,
         )
-        
+
         # 4. Compress: 压缩与规范化（如果超预算）
         final_context = self._compress(structured_context)
-        
+
         return final_context

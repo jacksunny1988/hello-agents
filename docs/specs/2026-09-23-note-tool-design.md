@@ -200,6 +200,10 @@ class NoteType(StrEnum):
 class NoteError(AgentError): ...
 class NoteNotFoundError(NoteError): ...
 
+def utcnow() -> datetime: ...                         # 带时区 UTC
+def parse_datetime(value: Any) -> datetime | None: ...
+    # ISO 8601 字符串或 datetime → 带时区；朴素写法按 UTC；不可解析返回 None
+
 @dataclass
 class NoteConfig:
     notes_dir: Path = Path("./notes")
@@ -232,7 +236,7 @@ class Note(NoteMeta):
     def to_markdown(self) -> str: ...
     @classmethod
     def from_markdown(
-        cls, text: str, *, fallback_id: str, fallback_time: datetime
+        cls, text: str, *, file_path: str, fallback_time: datetime
     ) -> Note: ...                                   # 容错解析（§2.5）
 
 @dataclass
@@ -257,6 +261,8 @@ class DriftReport:
 ```
 
 `Note` 继承 `NoteMeta`：`list()` 返回 `list[NoteMeta]`（索引里真有什么就返回什么），`read()` 返回带正文的 `Note`。构造入口刻意命名为 `from_index_entry` 而非 `from_dict`，避免与 `Note.from_markdown` 的语义打架。
+
+`from_markdown` 收 `file_path` 而不是 `fallback_id`：手改过 frontmatter 的文件，其 `id` 可能与文件名不一致，而 `file_path` 必须指向真实文件；兜底 id 由文件名 stem 在方法内部推导。`parse_datetime` 是公开辅助函数，供 `base` / `index` / `store` 三处共用。
 
 ### 4.2 `hello_agents/notes/index.py`
 
@@ -368,7 +374,7 @@ class NoteStore:
 
 | action | 必填 | 可选 | 成功 `data` | 失败 `code` |
 |---|---|---|---|---|
-| `create` | `title` | `body` `type` `tags` | `{id, title, type, tags, file_path}` | `INVALID_PARAM` |
+| `create` | `title` | `body` `type` `tags` | `{**meta}` | `INVALID_PARAM` |
 | `read` | `id` | — | `{**meta, "body": ...}` | `NOT_FOUND` |
 | `update` | `id` + 至少一个字段 | `title` `body` `type` `tags` | `{**meta}` | `NOT_FOUND` / `INVALID_PARAM` |
 | `delete` | `id` | — | `{id, deleted}` | `INVALID_PARAM` |
@@ -378,6 +384,7 @@ class NoteStore:
 
 - `text` 字段给人读：`read` 输出元信息头 + 全文；`list` 每行 `[type] 标题 (id, 更新时间)`；`search` 带分数；`summary` 按小节缩进；`create` / `update` / `delete` 输出一句确认。
 - 入参三形态（dict / JSON 字符串 / 纯文本），复用 `MemoryTool._parse_input` 的思路；**纯文本默认 `action="search"`**，`query` 取该文本。
+- `tags` 传成字符串时按逗号（含全角）与空白切分——LLM 常传 `"deps, phase1"`，直接 `list()` 会拆成单个字符。
 - 意外异常统一 `ToolResponse.error(code="NOTE_ERROR", message=str(e))`，与 `MemoryTool` 的 `MEMORY_ERROR` 对称；`NoteNotFoundError` 转 `NOT_FOUND`，参数缺失转 `INVALID_PARAM`。
 - 构造签名 `NoteTool(store: NoteStore | None = None)`，缺省自建 `NoteStore()`。笔记无连接资源，**不需要 `__enter__` / `__exit__`**（与 `MemoryTool` 不同，那圈上下文管理器是为 `MemoryManager` 的连接准备的）。
 
@@ -442,8 +449,9 @@ L1 只在发现集合差异时才解析新文件的 frontmatter，因此稳态�
 
 | 文件 | 覆盖 |
 |---|---|
+| `tests/test_note_base.py` | YAML 标量序列化（裸写 / 引号 / 中文 / 空值）、`tags` 行内紧凑风格、标题含 YAML 特殊字符的往返、正文含 `---` 水平线、CRLF 与 BOM 容错、`from_markdown` 的七种兜底、`parse_datetime`、`NoteConfig` 校验与 `from_env`、`DriftReport` |
 | `tests/test_note_index.py` | `load` / `save` 往返、文件不存在与 JSON 损坏的兜底、`upsert` 覆盖与缺字段报错、`remove`、`replace_all`、`filter` 的 type / tags(AND) / since-until(updated_at) / 组合、`all()` 的 `updated_at` 降序、顶层键排序与原子落盘 |
-| `tests/test_note_store.py` | CRUD 全链路、`create` 的 id 格式与同秒冲突递增、`create(note_id=...)` 幂等冲突、`delete` 幂等、文件格式往返（写出的 `.md` 能被 `yaml.safe_load` 读回且逐字段等于 §2.2）、§2.5 七种容错兜底、L1/L2/L3 三级漂移检测与修复、`rebuild_index`、`list` 不读文件（用 monkeypatch 计数）、`summary` 的小节提取与截断 |
+| `tests/test_note_store.py` | CRUD 全链路、`create` 的 id 格式与同秒冲突递增、`create(note_id=...)` 幂等冲突、`delete` 幂等、L1/L2/L3 三级漂移检测与修复、`rebuild_index`、`list` 不读文件（用 monkeypatch 计数）、`summary` 的小节提取与截断、自动修复不改写 `.md` 字节 |
 | `tests/test_note_search.py` | 分词（中英混合、大小写、标点、CJK bigram 边界）、`coverage` 边界（空 needles / 无交集 / 全交集）、`score` 空查询为 0、标题命中优先于正文命中、权重常量可调 |
 | `tests/test_note_tool.py` | 七个动作的成功路径与 `ToolResponse` 契约、`NOT_FOUND` / `INVALID_PARAM` / `NOTE_ERROR` 三个错误码、dict / JSON 字符串 / 纯文本三种入参、纯文本默认 `action=search`、`update` 无字段时报 `INVALID_PARAM`、`get_parameters()` 与动作集一致 |
 
@@ -479,9 +487,10 @@ L1 只在发现集合差异时才解析新文件的 frontmatter，因此稳态�
 | `hello_agents/notes/store.py` | 新建 |
 | `hello_agents/tools/builtin/note_tool.py` | 新建 |
 | `hello_agents/tools/builtin/__init__.py` | 改 1 行：`__all__` 补导出 `NoteTool` |
-| `hello_agents/tools/__init__.py` | 改 1 行：`__all__` 补导出 `NoteTool` |
 | `pyproject.toml` + `uv.lock` | `uv add pyyaml` |
+| `.gitignore` | 改 1 行：忽略示例产物 `notes/` |
 | `tests/conftest.py` | 追加 2 个夹具 |
+| `tests/test_note_base.py` | 新建 |
 | `tests/test_note_index.py` | 新建 |
 | `tests/test_note_store.py` | 新建 |
 | `tests/test_note_search.py` | 新建 |
@@ -500,11 +509,11 @@ L1 只在发现集合差异时才解析新文件的 frontmatter，因此稳态�
 
 ## 8. 实施顺序
 
-1. `uv add pyyaml` + `notes/base.py`（数据模型、配置、异常、容错解析）
+1. `uv add pyyaml` + `notes/base.py`（数据模型、配置、异常、容错解析）+ `tests/test_note_base.py`
 2. `notes/index.py` + `tests/test_note_index.py`
 3. `notes/search.py` + `tests/test_note_search.py`
-4. `notes/store.py` + `tests/test_note_store.py`（含三级漂移检测）
-5. `notes/__init__.py` 导出
-6. `tools/builtin/note_tool.py` + 两处 `__init__.py` 导出 + `tests/test_note_tool.py`
-7. `examples/note_tool_demo.py`
+4. `notes/store.py` 的 CRUD 与索引协同（L1 / L2）+ conftest 夹具 + `tests/test_note_store.py` 前半
+5. `notes/store.py` 的检索与完整性（`list` / `search` / `summary` / `verify` / `rebuild_index`）+ `tests/test_note_store.py` 后半
+6. `notes/__init__.py` 定稿 + `tools/builtin/note_tool.py` + `builtin/__init__.py` 导出 + `tests/test_note_tool.py`
+7. `examples/note_tool_demo.py` + `.gitignore`
 8. `ruff format` + `ruff check` + `pytest` 全量收尾

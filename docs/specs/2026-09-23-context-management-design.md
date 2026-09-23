@@ -401,6 +401,13 @@ class ContextBuilder:
 
 1. **预算计算**：`budget_policy.estimate(...)` 得 `complexity`，按 §4.2 公式得 `BudgetInfo`。打分包竞争 `BudgetInfo.available_tokens` 额度；系统指令已占用 `reserved_tokens` 额度，不参与本阶段预算（若系统指令实际占用超过 `reserved_tokens`，超出部分由阶段 4 压缩兜底）。
 2. **打分**：对每个 `relevance_score is None` 的包调 `relevance_scorer.score_many` 计算相关性；新近性由 `_calculate_recency(timestamp)` 算出：`recency = clamp(0.1, 1.0, exp(-0.1 × age_hours / 24))`，`age_hours` 为信息距构建时刻的小时数（`type=history` 的包改用 `position` 线性映射到 `[0.5, 1.0]`，见 §5.2）。
+
+   **时间戳统一按 tz-aware UTC 处理**：记忆层的 `created_at` 是 tz-aware UTC，而
+   `datetime.fromisoformat` 解析出的字符串可能是 naive 的。`_calculate_recency`
+   先把 naive 时间戳 `replace(tzinfo=UTC)` 归一，再与 `datetime.now(tz=UTC)` 求差，
+   避免 aware / naive 相减抛 `TypeError`。全模块**不使用** naive `datetime.now()`——
+   ruff 0.16.8 的默认规则集包含 `DTZ005`（naive `now()`）与 `UP017`（`timezone.utc`），
+   违反会让 lint 门槛失败。
 3. **综合分**：`relevance_weight * relevance_score + recency_weight * recency`。
 4. **相关性门槛**：`relevance_score < config.min_relevance` 的包丢弃并计入 `stats.dropped_by_relevance`。系统指令不参与评分与门槛。
 5. **贪心填充**：按综合分降序逐个纳入，直到 `available_tokens` 耗尽。放不下的包**跳过继续**（修复 B9 的 `break`），以便后续更小的包仍能入选；最终未能入选的计入 `stats.dropped_by_budget`。

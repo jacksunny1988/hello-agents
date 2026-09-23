@@ -35,7 +35,7 @@
 
 **依赖方向（无环）**：`base` → `budget` / `scoring` / `cache` / `experiment`；`scoring` → `memory.embedding`。`experiment` 只在 `TYPE_CHECKING` 下引用 `base.ContextConfig`，运行时无环。
 
-**约定**：中文 docstring、PEP 604 类型注解（`str | None`）、**泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）**、`@dataclass`（仅 `core/` 用 pydantic）、ruff（行宽 88；本环境 `requires-python = ">=3.13"` 推出 `target-version = py313`，有效规则集含 `UP` / `DTZ` / `BLE` / `I` / `F` / `E`）。每个任务结束提交一次，并在收尾时对**本任务触碰的文件**跑 `uv run ruff check` 清零告警。
+**约定**：中文 docstring、PEP 604 类型注解（`str | None`）、**泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）**、`@dataclass`（仅 `core/` 用 pydantic）、ruff（行宽 88；本环境 `requires-python = ">=3.13"` 推出 `target-version = py313`，有效规则集含 `DTZ` / `BLE` / `I` / `F` / `E`（已实测复现））。每个任务结束提交一次，并在收尾时对**本任务触碰的文件**跑 `uv run ruff check` 清零告警。
 
 ---
 
@@ -756,7 +756,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ..core.exceptions import ConfigError

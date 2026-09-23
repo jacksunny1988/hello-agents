@@ -406,8 +406,9 @@ class ContextBuilder:
    `datetime.fromisoformat` 解析出的字符串可能是 naive 的。`_calculate_recency`
    先把 naive 时间戳 `replace(tzinfo=UTC)` 归一，再与 `datetime.now(tz=UTC)` 求差，
    避免 aware / naive 相减抛 `TypeError`。全模块**不使用** naive `datetime.now()`——
-   ruff 0.16.8 的默认规则集包含 `DTZ005`（naive `now()`）与 `UP017`（`timezone.utc`），
-   违反会让 lint 门槛失败。
+   ruff 0.16.8 的默认规则集包含 `DTZ005`（naive `now()`），违反会让 lint 门槛失败。
+   （注：`UP017` 即 `timezone.utc` → `UTC` **不在**默认集内；此处统一写 `UTC`
+   只是为与 `datetime.now(tz=UTC)` 保持一致。）
 3. **综合分**：`relevance_weight * relevance_score + recency_weight * recency`。
 4. **相关性门槛**：`relevance_score < config.min_relevance` 的包丢弃并计入 `stats.dropped_by_relevance`。系统指令不参与评分与门槛。
 5. **贪心填充**：按综合分降序逐个纳入，直到 `available_tokens` 耗尽。放不下的包**跳过继续**（修复 B9 的 `break`），以便后续更小的包仍能入选；最终未能入选的计入 `stats.dropped_by_budget`。

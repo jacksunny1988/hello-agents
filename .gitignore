@@ -12,6 +12,9 @@ wheels/
 # Environment variables (contains API keys)
 .env
 
+# NoteTool 示例产物
+notes/
+
 # Serena local config
 .serena/
 

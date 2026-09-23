@@ -103,10 +103,13 @@ def test_read_不存在抛_note_not_found(note_store):
         note_store.read("note_missing")
 
 
-def test_read_拒绝含路径分隔符的_id(note_store):
+def test_read_拒绝含路径分隔符的_id(note_store, note_config):
+    outside = note_config.notes_dir.parent / "secret.md"
+    outside.write_text("别动我", encoding="utf-8")
     for bad in ("../secret", "a/b", "a\\b"):
         with pytest.raises(NoteError):
             note_store.read(bad)
+    assert outside.exists()
 
 
 def test_read_拒绝绝对路径与驱动器_id(note_store):
@@ -179,6 +182,34 @@ def test_delete_拒绝越界_id_且不动盘(note_store, note_config):
     with pytest.raises(NoteError):
         note_store.delete("../secret")
     assert outside.exists()
+
+
+def test_索引_file_path_与_create_越界均被拒_且不动盘(
+    note_store, note_config, monkeypatch
+):
+    outside = note_config.notes_dir.parent / "secret.md"
+    outside.write_text("别动我", encoding="utf-8")
+    note = note_store.create("标题")
+    index = json.loads(note_config.index_path.read_text(encoding="utf-8"))
+    index[note.id]["file_path"] = "../secret.md"
+    note_config.index_path.write_text(
+        json.dumps(index, ensure_ascii=False), encoding="utf-8"
+    )
+    # L1 自愈会先洗掉投毒的 file_path；只 load 不 heal，守卫才能接到索引里的值
+    monkeypatch.setattr(NoteStore, "_sync", lambda self: self._index.load())
+    with pytest.raises(NoteError):
+        note_store.read(note.id)
+    assert outside.read_text(encoding="utf-8") == "别动我"
+    with pytest.raises(NoteError):
+        note_store.delete(note.id)
+    assert outside.exists()
+    assert outside.read_text(encoding="utf-8") == "别动我"
+    # 写目标避开受害者：不覆盖检查截不了胡，双守卫同去才会真的写到盘外
+    with pytest.raises(NoteError):
+        note_store.create("标题", note_id="../evil")
+    assert not (note_config.notes_dir.parent / "evil.md").exists()
+    assert outside.exists()
+    assert outside.read_text(encoding="utf-8") == "别动我"
 
 
 def test_exists(note_store):

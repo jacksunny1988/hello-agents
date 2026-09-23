@@ -35,7 +35,7 @@
 
 **依赖方向（无环）**：`base` → `budget` / `scoring` / `cache` / `experiment`；`scoring` → `memory.embedding`。`experiment` 只在 `TYPE_CHECKING` 下引用 `base.ContextConfig`，运行时无环。
 
-**约定**：中文 docstring、PEP 604 类型注解（`str | None`）、`@dataclass`（仅 `core/` 用 pydantic）、ruff 默认配置（行宽 88）。每个任务结束提交一次。
+**约定**：中文 docstring、PEP 604 类型注解（`str | None`）、**泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）**、`@dataclass`（仅 `core/` 用 pydantic）、ruff（行宽 88；本环境 `requires-python = ">=3.13"` 推出 `target-version = py313`，有效规则集含 `UP` / `DTZ` / `BLE` / `I` / `F` / `E`）。每个任务结束提交一次，并在收尾时对**本任务触碰的文件**跑 `uv run ruff check` 清零告警。
 
 ---
 
@@ -138,15 +138,10 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'hello_agents.context.c
 
 from collections import OrderedDict
 from time import monotonic
-from typing import Generic, TypeVar
 
 __all__ = ["TTLCache"]
 
-K = TypeVar("K")
-V = TypeVar("V")
-
-
-class TTLCache(Generic[K, V]):
+class TTLCache[K, V]:
     """带 TTL 与 LRU 淘汰的缓存
 
     Attributes:
@@ -3479,17 +3474,64 @@ git commit -m "docs: document project modules and ContextBuilder usage"
 
 ## Task 16: 全量验证
 
-**Files:** 无改动，仅验证
+**Files:**
+- Modify: `hello_agents/memory/embedding.py`（Step 0，执行期发现的既有缺陷）
+- 其余无改动，仅验证
+
+> **执行期修订**：执行开始时发现两处**既有**问题会让本任务的原始门槛无法达成，
+> 已在下方显式处理，而非静默放宽。
+> ① `tests/test_embedding.py::test_factory_explicit_backend_raises_when_missing`
+> 在本分支未改动任何 embedding 文件时即失败（基线 `1 failed, 75 passed, 1 skipped`）。
+> ② `uv run ruff check hello_agents tests examples` 基线为 39 个告警，其中 13 个散落在
+> `search.py` / `core/llm.py` / `chain.py` / `memory_tool.py` / `calculator.py` /
+> `neo4j_store.py` / `simple_agent.py` / `react_agent.py` 等本次不涉及的模块。
+
+- [ ] **Step 0: 修复既有失败用例**
+
+`create_embedding` 把 API key 校验限死在 `auto` 分支：
+
+```python
+if not cfg.dashscope_api_key and backend == "auto":
+    raise RuntimeError("DASHSCOPE_API_KEY 未配置")
+```
+
+而 `DashScopeEmbedding.__init__` 也不校验 key。于是显式 `backend="dashscope"` 且
+key 为 `None` 时会静默返回一个调用时才失败的嵌入器 —— 与该函数 docstring
+「显式指定 backend 时失败会抛出异常，不做静默降级」直接矛盾。该用例原本依赖
+`dashscope` 未安装时的 `ImportError`，而 c0e26ff 已把 `dashscope` 提为核心依赖，
+这条路径随之失效。
+
+改为：
+
+```python
+if not cfg.dashscope_api_key:
+    raise RuntimeError("DASHSCOPE_API_KEY 未配置")
+```
+
+`auto` 分支行为不变：该 `raise` 位于 `try` 内，会被 `except Exception` 捕获并继续
+降级到 `local` → `tfidf`。
+
+Run: `uv run pytest tests/test_embedding.py -q`
+Expected: PASS —— 3 passed
+
+```bash
+git add hello_agents/memory/embedding.py
+git commit -m "fix: raise when explicit dashscope backend has no api key"
+```
 
 - [ ] **Step 1: 运行全部测试**
 
 Run: `uv run pytest tests/ -q`
-Expected: PASS —— 新增 5 个 context 测试文件与既有 10 个测试文件全绿，无失败
+Expected: PASS —— `0 failed`，新增 5 个 context 测试文件与既有 10 个测试文件全绿
 
 - [ ] **Step 2: 检查 lint**
 
 Run: `uv run ruff check hello_agents tests examples`
-Expected: `All checks passed!`
+Expected: 仅剩既有 13 个告警，且**无一落在本次触碰的文件**上。
+`hello_agents/context/`（含重写后的 `base.py`）、`hello_agents/memory/__init__.py`、
+`hello_agents/core/__init__.py`、`hello_agents/tools/builtin/rag_tool.py`、
+`tests/test_context_*.py`、`examples/context_builder_demo.py` 必须全部零告警。
+既有 13 个告警超出本计划范围，记录在案不修。
 
 - [ ] **Step 3: 检查格式**
 

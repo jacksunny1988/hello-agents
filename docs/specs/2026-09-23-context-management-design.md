@@ -120,7 +120,7 @@ hello_agents/context/
 ### 4.1 `hello_agents/context/cache.py`
 
 ```python
-class TTLCache(Generic[K, V]):
+class TTLCache[K, V]:
     def __init__(self, max_size: int = 256, ttl_seconds: float = 3600.0) -> None: ...
     def get(self, key: K) -> V | None: ...
     def put(self, key: K, value: V) -> None: ...
@@ -461,6 +461,7 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 - **全部离线零 API key**：打分用 `KeywordOverlapScorer` 或 `TFIDFEmbedding`。
 - 中文模块 docstring 与中文用例名，纯 `assert`，flat `tests/test_*.py`。
 - 异步用例显式 `@pytest.mark.asyncio`（与既有测试一致）。
+- 泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）：`requires-python = ">=3.13"` 使 ruff 推出 `target-version = py313`，`Generic` 子类会触发 `UP046`。
 
 ### 7.3 缺陷回归点
 
@@ -483,8 +484,15 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 
 ### 7.4 验收标准
 
-1. `uv run pytest tests/ -q` 全绿，**既有 10 个 memory / tools 测试不得回归**。
-2. `uv run ruff check hello_agents tests examples` 无告警；`uv run ruff format --check hello_agents tests examples` 通过。
+1. `uv run pytest tests/ -q` 全绿（`0 failed`），**既有 10 个 memory / tools 测试不得回归**。
+   执行期发现 `tests/test_embedding.py::test_factory_explicit_backend_raises_when_missing`
+   在本分支未改动任何 embedding 文件时即失败（基线 `1 failed, 75 passed, 1 skipped`）——
+   属既有缺陷，随本计划一并修复（见 §9 实施顺序 Step 0）。
+2. `uv run ruff check hello_agents tests examples` 中，**本次触碰的文件零告警**；
+   `uv run ruff format --check hello_agents tests examples` 通过。
+   基线另有 13 个告警散落在 `search.py` / `core/llm.py` / `chain.py` / `memory_tool.py` /
+   `calculator.py` / `neo4j_store.py` / `simple_agent.py` / `react_agent.py`，
+   超出本计划范围，记录在案不修。
 3. 无 `DASHSCOPE_API_KEY` 时 `uv run python examples/context_builder_demo.py` 可完整跑通并打印统计摘要。
 4. `builder.build(q, history, sys)` 返回 `str` 且含 `[Task]` 段。
 5. `builder.build_result(q, history, sys).stats` 满足：`candidates_total > 0`、`0 < token_utilization <= 1.0`、`budget.available_tokens == budget.scaled_max_tokens - budget.reserved_tokens`。
@@ -523,6 +531,11 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 
 ## 9. 实施顺序
 
+0. 修复既有失败用例（执行期发现）：`memory/embedding.py` 的 `create_embedding` 把
+   API key 校验限死在 `auto` 分支，导致显式 `backend="dashscope"` 且无 key 时静默
+   返回一个调用时才失败的嵌入器，与自身 docstring 矛盾，并使
+   `test_factory_explicit_backend_raises_when_missing` 长期失败。去掉 `and backend == "auto"`
+   即可；`auto` 分支行为不变（`raise` 在 `try` 内被捕获后继续降级）。
 1. `cache.py`（无依赖）
 2. `budget.py`
 3. `scoring.py`

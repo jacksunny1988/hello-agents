@@ -143,6 +143,7 @@ class BudgetInfo:
     available_tokens: int       # 可供打分包竞争
 
 class BudgetPolicy(Protocol):
+    name: str                   # 稳定策略名；缺失时调用方回退为类名
     def estimate(
         self,
         query: str,
@@ -155,16 +156,27 @@ class HeuristicBudgetPolicy:
     """零成本启发式复杂度估计，BudgetPolicy 的默认实现。"""
 ```
 
+`BudgetInfo` 不变式：`available_tokens == scaled_max_tokens - reserved_tokens`。
+
+`BudgetPolicy` 是公开扩展点，第三方会实现它，因此两处契约必须写进 docstring：
+- `name` 用于 `BudgetInfo.policy` 的 A/B 归因，实现应提供稳定值；缺失时调用方
+  回退为类名（`getattr(policy, "name", type(policy).__name__)`）。
+- `system_instructions` 实现**可以忽略**；调用方始终以关键字传入，
+  **签名不得收窄**。
+
 **启发式复杂度公式**（四项权重和为 1.0，结果截断到 `[0,1]`）：
 
 ```
 complexity = clamp01(
       0.40 * min(len(query) / 200, 1.0)        # 查询长度
-    + 0.20 * is_interrogative                  # 含疑问词：何/如何/为什么/怎么/what/why/how/which/when/where
+    + 0.20 * is_interrogative                  # 含疑问词：如何/为何/为什么/怎么/怎样/多少/哪些/哪个/什么/吗/what/why/how/which/when/where
     + 0.20 * min(len(history) / 10, 1.0)       # 历史规模
-    + 0.20 * has_retrieval_cue                 # 含「根据/依据/文档/参考/手册/based on/according to」等线索
+    + 0.20 * has_retrieval_cue                 # 含「根据/依据/文档/参考/手册/资料/based on/according to」等线索
 )
 ```
+
+`200` 字符与 `10` 轮为饱和点，超出即取满该项。刻意**不**收录裸「何」：
+虽能多命中「何时/何处」，但会误伤「任何/几何」，对 0.2 权重项得不偿失。
 
 **预算缩放**：
 

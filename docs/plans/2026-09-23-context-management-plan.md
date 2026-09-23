@@ -1451,6 +1451,8 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'hello_agents.context.e
     config, variant = assigner.apply(config, spec, session_id)
 """
 
+from __future__ import annotations
+
 import hashlib
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -2533,7 +2535,14 @@ def test_structure_routes_sources_to_sections():
 
 def test_structure_keeps_template_order():
     builder = ContextBuilder()
-    selected = [_packet("记忆", "memory"), _packet("知识", "rag")]
+    # 三包乱序传入：既钉模板顺序，也钉「不许按输入顺序吐出」。
+    # 必须含 system_instruction 包 —— Role & Policies 段是 `if policies:` 有条件添加，
+    # 少了它实际产出只有 4 段（Task/Evidence/Context/Output），期望的 5 段列表会直接红。
+    selected = [
+        _packet("记忆", "memory"),
+        _packet("知识", "rag"),
+        _packet("你是助手", "system_instruction"),
+    ]
     sections = builder._structure(selected, "问题")
     assert [section.title for section in sections] == [
         "Role & Policies",
@@ -3113,18 +3122,26 @@ Expected: 打印构造函数签名与 `_do_query` 当前实现（可见 `"chunks
 
 - [ ] **Step 2: Write the failing test**
 
-在 `tests/test_rag_tool.py` 末尾追加（构造与 ingest 调用按 Step 1 观察到的既有写法书写；下面以 `RAGTool(manager=manager)` 为例，若实际参数名不同则相应调整这一行）：
+在 `tests/test_rag_tool.py` 末尾追加。**直接用该文件既有的 `tool` 夹具**（它构造的是
+`RAGPipeline(memory_manager=manager, chunk_size=200, chunk_overlap=20)` → `RAGTool(pipeline=pipeline)`）：
 
 ```python
-def test_query_chunks_include_score(manager):
-    """修复 B15：chunk 字典必须带 score，与 MemoryTool.recall 对齐"""
-    from hello_agents.tools.builtin import RAGTool
+def test_query_chunks_include_score(tool):
+    """修复 B15：chunk 字典必须带 score，与 MemoryTool.recall 对齐
 
-    tool = RAGTool(manager=manager)
-    tool.run({"action": "ingest", "content": "向量库使用 Qdrant 存储", "source": "demo"})
+    注意：ingest 只传 `content`，**不要**同时传 `source` —— `rag_tool.py` 的分派是
+    `if source: ingest_file(source) / elif content: ingest_text(content)`，source 优先，
+    `"demo"` 会被当成文件路径走 `ingest_file` 而失败，query 拿到 0 个 chunk，
+    与本用例要钉的 score 无关地变红。
+    """
+    tool.run({"action": "ingest", "content": "向量库使用 Qdrant 存储"})
     resp = tool.run({"action": "query", "question": "向量库用什么存储"})
     assert resp.data["chunks"]
-    assert all("score" in chunk for chunk in resp.data["chunks"])
+    # 不只钉键存在 —— `{"score": 0.0}` 也能满足 `"score" in chunk`。
+    # 与 pipeline 的检索真值比对，钉住 score 是真带过来的，不是占位。
+    result = tool.pipeline.query("向量库用什么存储")
+    for chunk, item in zip(resp.data["chunks"], result.chunks):
+        assert chunk["score"] == pytest.approx(item.score)
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -3501,13 +3518,15 @@ print(result.stats.to_dict())   # 可直接投递给日志平台
 ```python
 from hello_agents.context import ContextBuilder, ContextConfig
 from hello_agents.memory import MemoryManager
+from hello_agents.memory.rag import RAGPipeline
 from hello_agents.tools.builtin import MemoryTool, RAGTool
 
 manager = MemoryManager()
+pipeline = RAGPipeline(memory_manager=manager)
 builder = ContextBuilder(
     ContextConfig(memory_limit=10, rag_limit=5),
     memory_tool=MemoryTool(manager=manager),
-    rag_tool=RAGTool(manager=manager),
+    rag_tool=RAGTool(pipeline=pipeline),
 )
 ```
 
@@ -3536,7 +3555,8 @@ builder = ContextBuilder(
 
 ### 自定义相关性打分
 
-默认使用零依赖的 `KeywordOverlapScorer`；配置 embedding 后端后升级为向量相似度：
+默认使用零依赖的 `KeywordOverlapScorer`；需要向量相似度时**显式注入** `EmbeddingSimilarityScorer`
+（`ContextBuilder` 的缺省打分器恒为 keyword，不会因配置了 embedding 后端就自动切换）：
 
 ```python
 from hello_agents.context import ContextBuilder, EmbeddingSimilarityScorer

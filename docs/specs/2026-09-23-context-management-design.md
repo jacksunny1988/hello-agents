@@ -242,7 +242,7 @@ class ExperimentAssigner:
 
 ```
 digest = sha256(f"{seed}:{spec.name}:{unit_id}".encode()).digest()
-bucket = int.from_bytes(digest[:8], "big") / 2**64      # 落入 [0, 1)
+bucket = int.from_bytes(digest[:8], "big") / 2**64      # 落入 [0, 1]（float64 下 (2**64-1)/2**64 == 1.0，需兜底取末位变体）
 # 将 weights 归一化为累积区间，按 variants 键插入序排列，bucket 落入哪个区间即取哪个变体
 ```
 

@@ -587,7 +587,16 @@ git commit -m "feat: export ConfigError and cosine_similarity from package roots
 
 **Files:**
 - Rewrite: `hello_agents/context/base.py`（本任务只写数据类型，`ContextBuilder` 留到 Task 7）
+- Modify: `hello_agents/context/__init__.py`（**执行期发现的计划缺陷**，见下）
 - Test: `tests/test_context_builder.py`
+
+> **执行期修订**：本任务把 `ContextBuilder` 从 `base.py` 移除，但
+> `context/__init__.py` 仍写着 `from .base import ContextBuilder, ...`。导入
+> `hello_agents.context.base` 会先执行包 `__init__`，因此**整个测试套件会在
+> collection 阶段报 `ImportError`**，Task 5–12 每步都要跑 `pytest`，全都会撞上。
+> 计划原先把 `__init__.py` 的重写放在 Task 13，太晚。此处先做最小替换：
+> 从 import 与 `__all__` 中摘掉 `ContextBuilder`（Task 13 会整体重写该文件）。
+> 计划原文的 Step 4「Expected: PASS — 12 passed」在不改该文件时无法达成。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -596,7 +605,7 @@ git commit -m "feat: export ConfigError and cosine_similarity from package roots
 ```python
 """ContextBuilder 测试：数据类型 / 四阶段全链路 / 缺陷回归"""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -613,14 +622,14 @@ from hello_agents.core import ConfigError
 
 def test_packet_clamps_relevance_score():
     packet = ContextPacket(
-        content="x", timestamp=datetime.now(), relevance_score=1.7
+        content="x", timestamp=datetime.now(tz=UTC), relevance_score=1.7
     )
     assert packet.relevance_score == 1.0
 
 
 def test_packet_keeps_none_relevance_score():
     """修复 B8：None 表示待计算，不再用 0.5 哨兵"""
-    packet = ContextPacket(content="x", timestamp=datetime.now())
+    packet = ContextPacket(content="x", timestamp=datetime.now(tz=UTC))
     assert packet.relevance_score is None
     assert packet.token_count == 0
     assert packet.metadata == {}
@@ -628,7 +637,7 @@ def test_packet_keeps_none_relevance_score():
 
 def test_packet_keeps_explicit_half_score():
     packet = ContextPacket(
-        content="x", timestamp=datetime.now(), relevance_score=0.5
+        content="x", timestamp=datetime.now(tz=UTC), relevance_score=0.5
     )
     assert packet.relevance_score == 0.5
 
@@ -747,7 +756,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..core.exceptions import ConfigError
@@ -979,7 +988,7 @@ Expected: PASS — 12 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/base.py hello_agents/context/__init__.py tests/test_context_builder.py
 git commit -m "feat: add context data types with ConfigError validation"
 ```
 
@@ -1639,7 +1648,7 @@ def test_explicit_policy_beats_config_policy():
 
 
 def test_parse_timestamp_accepts_iso_and_datetime():
-    now = datetime.now()
+    now = datetime.now(tz=UTC)
     assert _parse_timestamp(now) is now
     parsed = _parse_timestamp("2026-09-23T10:00:00")
     assert parsed.year == 2026
@@ -1649,9 +1658,9 @@ def test_parse_timestamp_accepts_iso_and_datetime():
 
 def test_count_by_source_always_lists_all_five_types():
     packets = [
-        ContextPacket(content="a", timestamp=datetime.now(), metadata={"type": "rag"}),
-        ContextPacket(content="b", timestamp=datetime.now(), metadata={"type": "rag"}),
-        ContextPacket(content="c", timestamp=datetime.now()),
+        ContextPacket(content="a", timestamp=datetime.now(tz=UTC), metadata={"type": "rag"}),
+        ContextPacket(content="b", timestamp=datetime.now(tz=UTC), metadata={"type": "rag"}),
+        ContextPacket(content="c", timestamp=datetime.now(tz=UTC)),
     ]
     counts = _count_by_source(packets)
     assert counts == {
@@ -1691,7 +1700,7 @@ import logging
 import math
 import tiktoken
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -1731,7 +1740,7 @@ def _parse_timestamp(raw: Any) -> datetime:
             return datetime.fromisoformat(raw)
         except ValueError:
             logger.debug("无法解析时间戳 %r，退回当前时刻", raw)
-    return datetime.now()
+    return datetime.now(tz=UTC)
 
 
 def _count_by_source(packets: list[ContextPacket]) -> dict[str, int]:
@@ -1883,7 +1892,7 @@ def _memory_hits(*contents, score=0.8, importance=None):
                 "content": content,
                 "memory_type": "semantic",
                 "metadata": metadata,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(tz=UTC).isoformat(),
                 "expires_at": None,
                 "score": score,
             }
@@ -1997,7 +2006,7 @@ def test_gather_marks_history_position_and_type():
 
 
 def test_gather_fills_token_count_for_custom_packets():
-    custom = ContextPacket(content="自定义信息", timestamp=datetime.now())
+    custom = ContextPacket(content="自定义信息", timestamp=datetime.now(tz=UTC))
     builder = ContextBuilder()
     packets = builder._gather("查询", [], None, [custom], builder.config)
     assert packets[0].token_count == builder._count_tokens("自定义信息")
@@ -2006,7 +2015,7 @@ def test_gather_fills_token_count_for_custom_packets():
 def test_gather_keeps_explicit_relevance_score_on_custom_packets():
     """修复 B8：预置 0.5 不得被当作「未评分」"""
     custom = ContextPacket(
-        content="自定义信息", timestamp=datetime.now(), relevance_score=0.5
+        content="自定义信息", timestamp=datetime.now(tz=UTC), relevance_score=0.5
     )
     builder = ContextBuilder()
     packets = builder._gather("查询", [], None, [custom], builder.config)
@@ -2031,7 +2040,7 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_g
             return cached
         packet = ContextPacket(
             content=instructions,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=UTC),
             token_count=self._count_tokens(instructions),
             relevance_score=1.0,
             metadata={"type": "system_instruction", "priority": "high"},
@@ -2111,7 +2120,7 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_g
         window = config.history_window
         if window <= 0 or not history:
             return []
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         packets: list[ContextPacket] = []
         for position, message in enumerate(history[-window:]):
             content = f"{message.role}: {message.content}"
@@ -2167,6 +2176,10 @@ git commit -m "feat: implement gather stage with real tool contracts"
 
 ## Task 9: 选择阶段（Select）
 
+> **注意**：本段测试用到 `timedelta`，需把 `tests/test_context_builder.py` 顶部的
+> `from datetime import UTC, datetime` 扩展为 `from datetime import UTC, datetime, timedelta`
+> （Task 4 只写了 `UTC, datetime`，因为那时 `timedelta` 尚未被使用，留着会触发 F401）。
+
 **Files:**
 - Modify: `hello_agents/context/base.py`（追加 `_calculate_recency` / `_recency_of` / `_select`）
 - Modify: `tests/test_context_builder.py`
@@ -2206,9 +2219,9 @@ def test_select_does_not_rescore_explicit_half_score():
     config = _select_config()
     builder = ContextBuilder(config, relevance_scorer=scorer)
     explicit = ContextPacket(
-        content="explicit", timestamp=datetime.now(), token_count=1, relevance_score=0.5
+        content="explicit", timestamp=datetime.now(tz=UTC), token_count=1, relevance_score=0.5
     )
-    unscored = ContextPacket(content="unscored", timestamp=datetime.now(), token_count=1)
+    unscored = ContextPacket(content="unscored", timestamp=datetime.now(tz=UTC), token_count=1)
     builder._select([explicit, unscored], "q", 100, 100, config)
     assert scorer.scored == ["unscored"]
     assert explicit.relevance_score == 0.5
@@ -2220,10 +2233,10 @@ def test_select_keeps_small_packet_when_large_one_does_not_fit():
     config = _select_config()
     builder = ContextBuilder(config)
     big = ContextPacket(
-        content="big", timestamp=datetime.now(), token_count=20, relevance_score=1.0
+        content="big", timestamp=datetime.now(tz=UTC), token_count=20, relevance_score=1.0
     )
     small = ContextPacket(
-        content="small", timestamp=datetime.now(), token_count=5, relevance_score=0.5
+        content="small", timestamp=datetime.now(tz=UTC), token_count=5, relevance_score=0.5
     )
     selected, _, dropped_by_budget = builder._select([big, small], "q", 10, 100, config)
     assert [packet.content for packet in selected] == ["small"]
@@ -2234,7 +2247,7 @@ def test_select_drops_packets_below_min_relevance():
     config = _select_config(min_relevance=0.5)
     builder = ContextBuilder(config)
     weak = ContextPacket(
-        content="weak", timestamp=datetime.now(), token_count=1, relevance_score=0.2
+        content="weak", timestamp=datetime.now(tz=UTC), token_count=1, relevance_score=0.2
     )
     selected, dropped_by_relevance, _ = builder._select([weak], "q", 100, 100, config)
     assert selected == []
@@ -2247,7 +2260,7 @@ def test_select_always_keeps_system_instructions():
     builder = ContextBuilder(config)
     system = ContextPacket(
         content="你是助手",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=4,
         relevance_score=1.0,
         metadata={"type": "system_instruction"},
@@ -2262,13 +2275,13 @@ def test_select_skips_scoring_when_system_instructions_exceed_budget():
     builder = ContextBuilder(config)
     system = ContextPacket(
         content="很长的系统指令",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=50,
         relevance_score=1.0,
         metadata={"type": "system_instruction"},
     )
     other = ContextPacket(
-        content="候选", timestamp=datetime.now(), token_count=1, relevance_score=1.0
+        content="候选", timestamp=datetime.now(tz=UTC), token_count=1, relevance_score=1.0
     )
     selected, _, dropped_by_budget = builder._select([system, other], "q", 0, 10, config)
     assert selected == [system]
@@ -2281,14 +2294,14 @@ def test_select_ranks_history_by_position():
     builder = ContextBuilder(config)
     older = ContextPacket(
         content="旧",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=1,
         relevance_score=1.0,
         metadata={"type": "history", "position": 0},
     )
     newer = ContextPacket(
         content="新",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=1,
         relevance_score=1.0,
         metadata={"type": "history", "position": 1},
@@ -2299,18 +2312,16 @@ def test_select_ranks_history_by_position():
 
 def test_recency_decays_with_age():
     builder = ContextBuilder()
-    fresh = builder._calculate_recency(datetime.now())
-    stale = builder._calculate_recency(datetime.now() - timedelta(days=30))
+    fresh = builder._calculate_recency(datetime.now(tz=UTC))
+    stale = builder._calculate_recency(datetime.now(tz=UTC) - timedelta(days=30))
     assert fresh > stale
     assert 0.1 <= stale <= 1.0
     assert 0.1 <= fresh <= 1.0
 
 
 def test_recency_handles_timezone_aware_timestamp():
-    from datetime import timezone
-
     builder = ContextBuilder()
-    aware = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    aware = datetime.now(tz=UTC) - timedelta(hours=1)
     score = builder._calculate_recency(aware)
     assert 0.1 <= score <= 1.0
 ```
@@ -2328,10 +2339,14 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_s
     def _calculate_recency(self, timestamp: datetime) -> float:
         """指数衰减：24 小时内保持高分，之后逐渐衰减
 
-        兼容 tz-aware 与 naive 时间戳（记忆层的 created_at 是 tz-aware UTC）。
+        记忆层的 created_at 是 tz-aware UTC，而 ISO 字符串解析出的时间戳可能
+        是 naive 的；统一按 UTC 归一后再求差，避免 aware / naive 相减报错。
         """
-        now = datetime.now(tz=timestamp.tzinfo) if timestamp.tzinfo else datetime.now()
-        age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        age_hours = max(
+            0.0, (datetime.now(tz=UTC) - timestamp).total_seconds() / 3600
+        )
         return max(0.1, min(1.0, math.exp(-0.1 * age_hours / 24)))
 
     def _recency_of(self, packet: ContextPacket, history_count: int) -> float:
@@ -2448,7 +2463,7 @@ git commit -m "feat: implement select stage with budget, relevance and position-
 def _packet(content: str, packet_type: str, tokens: int = 1) -> ContextPacket:
     return ContextPacket(
         content=content,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=tokens,
         relevance_score=1.0,
         metadata={"type": packet_type},
@@ -2487,7 +2502,7 @@ def test_structure_honours_evidence_section_override():
     builder = ContextBuilder()
     packet = ContextPacket(
         content="自定义证据",
-        timestamp=datetime.now(),
+        timestamp=datetime.now(tz=UTC),
         token_count=1,
         relevance_score=1.0,
         metadata={"type": "custom", "section": "evidence"},
@@ -2784,7 +2799,7 @@ def test_build_full_pipeline_has_no_type_error():
     """修复 B4-B7：四阶段调用签名必须一致"""
     builder = ContextBuilder()
     history = [Message(role=MessageRole.USER, content="你好")]
-    custom = [ContextPacket(content="附加信息", timestamp=datetime.now())]
+    custom = [ContextPacket(content="附加信息", timestamp=datetime.now(tz=UTC))]
     result = builder.build_result("问题", history, "你是助手", custom)
     assert result.context
     assert result.stats.candidates_total == 3
@@ -3226,7 +3241,7 @@ git commit -m "feat: export public context API from package root"
     uv run python examples/context_builder_demo.py
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from hello_agents.context import (
     ContextBuilder,
@@ -3249,12 +3264,12 @@ def _knowledge_packets() -> list[ContextPacket]:
     return [
         ContextPacket(
             content="Qdrant 是向量数据库，支持本地内存模式与远程服务模式。",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=UTC),
             metadata={"type": "rag"},
         ),
         ContextPacket(
             content="用户偏好深蓝色主题。",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=UTC),
             metadata={"type": "memory"},
         ),
     ]

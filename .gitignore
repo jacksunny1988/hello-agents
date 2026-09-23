@@ -14,3 +14,6 @@ wheels/
 
 # Serena local config
 .serena/
+
+# 本地 worktree 目录
+.worktrees/

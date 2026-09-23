@@ -4,22 +4,29 @@
 文件是真相源，索引是派生缓存：任何自动修复只改索引，绝不改写 .md。
 """
 
+from __future__ import annotations
+
 import logging
 import os
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .base import (
+    DriftReport,
     Note,
     NoteConfig,
     NoteError,
     NoteMeta,
     NoteNotFoundError,
+    NoteSummary,
     NoteType,
+    SectionPreview,
     utcnow,
 )
 from .index import NoteIndex
+from .search import score
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +144,94 @@ class NoteStore:
         self._sync()
         return self._index.get(note_id) is not None
 
+    def list(
+        self,
+        *,
+        type: str | None = None,
+        tags: list[str] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[NoteMeta]:
+        """按索引过滤列出笔记元数据——不读任何笔记文件
+
+        这是索引存在的意义：目录里有上千条笔记时，本方法也只读一次索引。
+        """
+        self._sync()
+        entries = self._index.filter(type=type, tags=tags, since=since, until=until)
+        return [NoteMeta.from_index_entry(entry) for entry in entries[:limit]]
+
+    def search(self, query: str, *, limit: int = 10) -> list[tuple[NoteMeta, float]]:
+        """关键词检索：对全部笔记正文打分（O(n) 文件读），顺手做 L2 修正
+
+        只返回分数大于 0 的命中；按分数降序，同分沿用索引的 ``updated_at`` 降序
+        （索引本身已按此排序，``sort`` 稳定）。
+        """
+        self._sync()
+        scored: list[tuple[NoteMeta, float]] = []
+        changed = False
+        for entry in self._index.all():
+            note = self._read_file(str(entry["file_path"]))
+            changed |= self._repair_one(note)
+            value = score(note.title, note.tags, note.body, query)
+            if value > 0:
+                scored.append((note, value))
+        if changed:
+            self._index.save()
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:limit]
+
+    def summary(
+        self,
+        *,
+        type: str | None = None,
+        tags: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[NoteSummary]:
+        """全库摘要：元数据 + 正文小节预览（O(n) 文件读）
+
+        与 ``list`` 的成本差异是刻意的：摘要要正文小节，必须读文件。
+        """
+        self._sync()
+        summaries: list[NoteSummary] = []
+        changed = False
+        for entry in self._index.filter(type=type, tags=tags)[:limit]:
+            note = self._read_file(str(entry["file_path"]))
+            changed |= self._repair_one(note)
+            summaries.append(NoteSummary(meta=note, sections=_sections_of(note.body)))
+        if changed:
+            self._index.save()
+        return summaries
+
+    def verify(self) -> DriftReport:
+        """L3 全量级：读所有 .md 逐字段比对，只报告不改动（不写盘）"""
+        self._index.load()
+        on_disk = self._markdown_names()
+        indexed = {str(entry["file_path"]): entry for entry in self._index.all()}
+        return DriftReport(
+            missing_files=[
+                str(entry["id"])
+                for file_name, entry in indexed.items()
+                if file_name not in on_disk
+            ],
+            orphan_files=sorted(on_disk - set(indexed)),
+            mismatched=[
+                str(indexed[file_name]["id"])
+                for file_name in sorted(on_disk & set(indexed))
+                if self._read_file(file_name).to_dict() != indexed[file_name]
+            ],
+        )
+
+    def rebuild_index(self) -> int:
+        """L3：清空索引并按目录全量重建，返回条目数"""
+        self._config.notes_dir.mkdir(parents=True, exist_ok=True)
+        entries = [
+            self._read_file(name).to_dict() for name in sorted(self._markdown_names())
+        ]
+        self._index.replace_all(entries)
+        self._index.save()
+        return len(self._index)
+
     def _sync(self) -> None:
         """L1 集合级：目录 ↔ 索引对齐（缺失条目删除、孤儿文件补录）"""
         self._index.load()
@@ -217,3 +312,40 @@ class NoteStore:
         while f"{prefix}{serial}" in used:
             serial += 1
         return f"{prefix}{serial}"
+
+
+_PREVIEW_CHARS = 80
+_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _sections_of(body: str) -> list[SectionPreview]:
+    """提取二级及以下标题作为小节，每节取紧随其后的首个非空行（截断 80 字符）
+
+    没有小节标题时取正文首个非空行作为唯一预览（``heading`` 为空串）；
+    正文为空时返回空列表。
+    """
+    matches = list(_HEADING_RE.finditer(body))
+    if not matches:
+        first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        return (
+            [SectionPreview(heading="", preview=first[:_PREVIEW_CHARS])]
+            if first
+            else []
+        )
+    sections: list[SectionPreview] = []
+    for position, match in enumerate(matches):
+        end = (
+            matches[position + 1].start() if position + 1 < len(matches) else len(body)
+        )
+        preview = next(
+            (
+                line.strip()
+                for line in body[match.end() : end].splitlines()
+                if line.strip()
+            ),
+            "",
+        )
+        sections.append(
+            SectionPreview(heading=match.group(2), preview=preview[:_PREVIEW_CHARS])
+        )
+    return sections

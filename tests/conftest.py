@@ -30,8 +30,7 @@ def manager(config, embedding) -> MemoryManager:
     mgr.close()
 
 
-from hello_agents.notes.base import NoteConfig
-from hello_agents.notes.store import NoteStore
+from hello_agents.notes import NoteConfig, NoteStore
 
 
 @pytest.fixture

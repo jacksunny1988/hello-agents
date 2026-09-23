@@ -290,6 +290,10 @@ def test_budget_formula_pinned_at_low_and_mid_complexity():
     low = ContextBuilder(config, budget_policy=_FixedPolicy(0.0))
     low_info = low._compute_budget(config, "任意查询", [], None)
     assert low_info.scaled_max_tokens == 500
+    # T4：定点自洽，防 B11 用例被单独改动时失守
+    assert low_info.reserved_tokens + low_info.available_tokens == 500
+    assert low_info.reserved_tokens == 100
+    assert low_info.available_tokens == 400
     mid = ContextBuilder(config, budget_policy=_FixedPolicy(0.5))
     mid_info = mid._compute_budget(config, "任意查询", [], None)
     assert mid_info.scaled_max_tokens == 750
@@ -336,6 +340,17 @@ def test_parse_timestamp_accepts_iso_and_datetime():
     assert parsed == datetime(2026, 9, 23, 10, 0, 0, tzinfo=UTC)
 
 
+def test_parse_timestamp_keeps_offset_aware_iso_string():
+    """T2：带时区偏移的 ISO 串必须原样返回，不得 replace 成 UTC 壁钟改写"""
+    from datetime import timedelta, timezone
+
+    parsed = _parse_timestamp("2026-09-23T12:00:00+02:00")
+    assert parsed == datetime(
+        2026, 9, 23, 12, 0, 0, tzinfo=timezone(timedelta(hours=2))
+    )
+    assert parsed.utcoffset() == timedelta(hours=2)
+
+
 def test_parse_timestamp_fallback_is_tz_aware_now():
     """F3：退回值必须是「当前时刻」的 tz-aware UTC，而非任意 datetime"""
     for raw in (None, "not-a-date"):
@@ -343,7 +358,7 @@ def test_parse_timestamp_fallback_is_tz_aware_now():
         assert isinstance(result, datetime)
         assert result.tzinfo is UTC
         delta = abs((result - datetime.now(tz=UTC)).total_seconds())
-        assert delta < 5
+        assert delta < 1
 
 
 def test_parse_timestamp_normalizes_naive_to_utc():
@@ -431,6 +446,13 @@ def test_cache_counters_skip_non_ttl_scorer_cache():
     builder.cache.get("k")
     hits, misses = builder._cache_counters()
     assert (hits, misses) == (1, 0)
+
+
+def test_init_reads_cache_settings_from_config():
+    """T1：cache_max_size / cache_ttl_seconds 必须接到 TTLCache，而非吃默认值"""
+    builder = ContextBuilder(ContextConfig(cache_max_size=7, cache_ttl_seconds=12.5))
+    assert builder.cache.max_size == 7
+    assert builder.cache.ttl_seconds == 12.5
 
 
 def test_init_raises_config_error_when_tiktoken_unavailable(monkeypatch):

@@ -105,6 +105,18 @@ def test_read_不存在抛_note_not_found(note_store):
         note_store.read("note_missing")
 
 
+def test_read_拒绝含路径分隔符的_id(note_store):
+    for bad in ("../secret", "a/b", "a\\b"):
+        with pytest.raises(NoteError):
+            note_store.read(bad)
+
+
+def test_read_拒绝绝对路径与驱动器_id(note_store):
+    for bad in ("C:/temp/evil", "/tmp/evil"):
+        with pytest.raises(NoteError):
+            note_store.read(bad)
+
+
 def test_read_空文件与只有_frontmatter_的文件不崩(note_store, note_config):
     note_config.notes_dir.mkdir(parents=True, exist_ok=True)
     (note_config.notes_dir / "empty.md").write_text("", encoding="utf-8")
@@ -161,6 +173,14 @@ def test_delete_删除文件与索引条目(note_store, note_config):
 
 def test_delete_不存在返回_false(note_store):
     assert note_store.delete("note_missing") is False
+
+
+def test_delete_拒绝越界_id_且不动盘(note_store, note_config):
+    outside = note_config.notes_dir.parent / "secret.md"
+    outside.write_text("别动我", encoding="utf-8")
+    with pytest.raises(NoteError):
+        note_store.delete("../secret")
+    assert outside.exists()
 
 
 def test_exists(note_store):

@@ -47,6 +47,18 @@ def test_create_缺_title_报_invalid_param(tool):
     )
 
 
+def test_create_与_update_空白标题报_invalid_param(tool):
+    assert (
+        tool.run({"action": "create", "title": "  ", "body": "x"}).error_info["code"]
+        == "INVALID_PARAM"
+    )
+    note_id = tool.run({"action": "create", "title": "标题"}).data["id"]
+    assert (
+        tool.run({"action": "update", "id": note_id, "title": ""}).error_info["code"]
+        == "INVALID_PARAM"
+    )
+
+
 def test_read_成功含正文(tool):
     note_id = tool.run(
         {"action": "create", "title": "标题", "body": "## 结论\n\n锁定 httpx<0.28。"}
@@ -66,6 +78,11 @@ def test_read_不存在报_not_found(tool):
 
 def test_read_缺_id_报_invalid_param(tool):
     assert tool.run({"action": "read"}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_id_越界返回_invalid_param(tool):
+    response = tool.run({"action": "read", "id": "../secret"})
+    assert response.error_info["code"] == "INVALID_PARAM"
 
 
 def test_update_成功(tool):
@@ -129,6 +146,21 @@ def test_summary_返回_sections(tool):
     )
     notes = tool.run({"action": "summary"}).data["notes"]
     assert notes[0]["sections"] == [{"heading": "完成情况", "preview": "已完成重构。"}]
+
+
+def test_limit_规整(tool):
+    tool.run({"action": "create", "title": "依赖冲突一"})
+    tool.run({"action": "create", "title": "依赖冲突二"})
+    assert (
+        tool.run({"action": "search", "query": "依赖冲突", "limit": 0}).data["hits"]
+        == []
+    )
+    assert tool.run({"action": "list", "limit": 0}).data["notes"] == []
+    assert tool.run({"action": "summary", "limit": 0}).data["notes"] == []
+    assert len(tool.run({"action": "list", "limit": "2"}).data["notes"]) == 2
+    assert tool.run({"action": "list", "limit": -1}).error_info["code"] == (
+        "INVALID_PARAM"
+    )
 
 
 def test_未知_action_报_invalid_param(tool):

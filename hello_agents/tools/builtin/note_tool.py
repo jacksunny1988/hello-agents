@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from ...notes import NoteError, NoteNotFoundError, NoteStore, NoteType
+from ...notes.store import _safe_name
 from ..base import BaseTool, ToolParameter
 from ..response import ToolResponse
 
@@ -28,6 +29,19 @@ def _as_tags(value: Any) -> list[str] | None:
     if isinstance(value, str):
         return [item for item in re.split(r"[,，\s]+", value) if item]
     return [str(item) for item in value]
+
+
+def _as_limit(value: Any, default: int | None) -> int | None:
+    """规整 limit：``None`` → default；0 保留原值；负数或非数值抛 ValueError"""
+    if value is None:
+        return default
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"limit 必须是非负整数: {value!r}") from error
+    if limit < 0:
+        raise ValueError(f"limit 必须是非负整数: {value!r}")
+    return limit
 
 
 class NoteTool(BaseTool):
@@ -117,6 +131,8 @@ class NoteTool(BaseTool):
         title = params.get("title")
         if not title:
             return _invalid("action=create 需要提供 title")
+        if not str(title).strip():
+            return _invalid("action=create 的 title 不能为空白")
         note = self.store.create(
             title=str(title),
             body=str(params.get("body") or ""),
@@ -131,6 +147,10 @@ class NoteTool(BaseTool):
         note_id = params.get("id")
         if not note_id:
             return _invalid("action=read 需要提供 id")
+        try:
+            _safe_name(str(note_id))
+        except NoteError as error:
+            return _invalid(str(error))
         note = self.store.read(str(note_id))
         header = f"[{note.type}] {note.title} ({note.id}) 更新于 {note.updated_at.isoformat()}"
         return ToolResponse.success(
@@ -149,6 +169,12 @@ class NoteTool(BaseTool):
             fields[name] = _as_tags(value) if name == "tags" else value
         if not fields:
             return _invalid(f"action=update 至少需要提供 {list(_UPDATE_FIELDS)} 之一")
+        if "title" in fields and not str(fields["title"]).strip():
+            return _invalid("action=update 的 title 不能为空白")
+        try:
+            _safe_name(str(note_id))
+        except NoteError as error:
+            return _invalid(str(error))
         note = self.store.update(str(note_id), **fields)
         return ToolResponse.success(text=f"已更新笔记 {note.id}", data=note.to_dict())
 
@@ -156,6 +182,10 @@ class NoteTool(BaseTool):
         note_id = params.get("id")
         if not note_id:
             return _invalid("action=delete 需要提供 id")
+        try:
+            _safe_name(str(note_id))
+        except NoteError as error:
+            return _invalid(str(error))
         deleted = self.store.delete(str(note_id))
         text = f"已删除笔记 {note_id}" if deleted else f"笔记 {note_id} 不存在"
         return ToolResponse.success(
@@ -163,10 +193,14 @@ class NoteTool(BaseTool):
         )
 
     def _do_list(self, params: dict[str, Any]) -> ToolResponse:
+        try:
+            limit = _as_limit(params.get("limit"), None)
+        except ValueError as error:
+            return _invalid(str(error))
         notes = self.store.list(
             type=params.get("type"),
             tags=_as_tags(params.get("tags")),
-            limit=params.get("limit"),
+            limit=limit,
         )
         if not notes:
             return ToolResponse.success(text="暂无笔记。", data={"notes": []})
@@ -182,7 +216,11 @@ class NoteTool(BaseTool):
         query = params.get("query") or params.get("content")
         if not query:
             return _invalid("action=search 需要提供 query")
-        hits = self.store.search(str(query), limit=int(params.get("limit") or 10))
+        try:
+            limit = _as_limit(params.get("limit"), 10)
+        except ValueError as error:
+            return _invalid(str(error))
+        hits = self.store.search(str(query), limit=limit)
         if not hits:
             return ToolResponse.success(
                 text=f"未检索到与「{query}」相关的笔记。", data={"hits": []}
@@ -197,10 +235,14 @@ class NoteTool(BaseTool):
         )
 
     def _do_summary(self, params: dict[str, Any]) -> ToolResponse:
+        try:
+            limit = _as_limit(params.get("limit"), None)
+        except ValueError as error:
+            return _invalid(str(error))
         summaries = self.store.summary(
             type=params.get("type"),
             tags=_as_tags(params.get("tags")),
-            limit=params.get("limit"),
+            limit=limit,
         )
         if not summaries:
             return ToolResponse.success(text="暂无笔记。", data={"notes": []})

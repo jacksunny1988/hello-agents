@@ -68,6 +68,17 @@ def test_load_json_损坏时按空索引处理(index, caplog):
     assert "不可读" in caplog.text
 
 
+def test_索引是无效_utf8_时按损坏处理(index, caplog):
+    index.path.parent.mkdir(parents=True)
+    index.path.write_bytes(b"\xff\xfe\x00\x01")
+    with caplog.at_level("WARNING"):
+        index.load()
+    assert len(index) == 0
+    assert "不可读" in caplog.text
+    index.upsert(entry("note_a", updated="2026-09-23T15:30:00+00:00"))
+    index.save()
+
+
 def test_load_顶层不是对象时按空索引处理(index):
     index.path.parent.mkdir(parents=True)
     index.path.write_text("[1, 2]", encoding="utf-8")

@@ -44,7 +44,7 @@ class NoteIndex:
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             logger.warning("索引文件 %s 不可读（%s），按空索引处理", self._path, error)
             return
         if not isinstance(raw, dict):

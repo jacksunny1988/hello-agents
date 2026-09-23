@@ -31,6 +31,13 @@ from .search import score
 logger = logging.getLogger(__name__)
 
 
+def _safe_name(name: str) -> str:
+    """拒绝路径分隔符与驱动器前缀——文件名必须是 notes_dir 下的单段名"""
+    if not name or name in {".", ".."} or any(c in name for c in "/\\:\0"):
+        raise NoteError(f"非法文件名: {name!r}")
+    return name
+
+
 class NoteStore:
     """结构化笔记存储
 
@@ -69,7 +76,7 @@ class NoteStore:
         self._config.notes_dir.mkdir(parents=True, exist_ok=True)
         self._sync()
         now = utcnow()
-        new_id = note_id or self._next_id(now)
+        new_id = _safe_name(note_id) if note_id else self._next_id(now)
         if (
             self._index.get(new_id) is not None
             or (self._config.notes_dir / f"{new_id}.md").exists()
@@ -127,11 +134,11 @@ class NoteStore:
 
     def delete(self, note_id: str) -> bool:
         """删除笔记文件与索引条目；不存在返回 False"""
+        _safe_name(note_id)
         self._sync()
         entry = self._index.get(note_id)
-        path = self._config.notes_dir / (
-            str(entry["file_path"]) if entry else f"{note_id}.md"
-        )
+        file_name = str(entry["file_path"]) if entry else f"{note_id}.md"
+        path = self._config.notes_dir / _safe_name(file_name)
         if entry is None and not path.is_file():
             return False
         path.unlink(missing_ok=True)
@@ -254,7 +261,7 @@ class NoteStore:
     def _write(self, note: Note) -> None:
         """原子写 .md 并同步索引"""
         self._config.notes_dir.mkdir(parents=True, exist_ok=True)
-        path = self._config.notes_dir / note.file_path
+        path = self._config.notes_dir / _safe_name(note.file_path)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(note.to_markdown(), encoding="utf-8")
         os.replace(tmp, path)
@@ -263,6 +270,7 @@ class NoteStore:
 
     def _read_note(self, note_id: str) -> Note:
         """按 id 读文件；不存在抛 NoteNotFoundError"""
+        _safe_name(note_id)
         entry = self._index.get(note_id)
         file_name = str(entry["file_path"]) if entry else f"{note_id}.md"
         if not (self._config.notes_dir / file_name).is_file():
@@ -271,7 +279,7 @@ class NoteStore:
 
     def _read_file(self, file_name: str) -> Note:
         """读并解析一个笔记文件（BOM 由 utf-8-sig 处理）"""
-        path = self._config.notes_dir / file_name
+        path = self._config.notes_dir / _safe_name(file_name)
         return Note.from_markdown(
             path.read_text(encoding="utf-8-sig"),
             file_path=file_name,

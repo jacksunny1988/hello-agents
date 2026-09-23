@@ -126,6 +126,10 @@ class ContextConfig:
             raise ConfigError("reserve_ratio 必须在 [0, 1] 范围内")
         if not 0.0 <= self.min_relevance <= 1.0:
             raise ConfigError("min_relevance 必须在 [0, 1] 范围内")
+        if not 0.0 <= self.relevance_weight <= 1.0:
+            raise ConfigError("relevance_weight 必须在 [0, 1] 范围内")
+        if not 0.0 <= self.recency_weight <= 1.0:
+            raise ConfigError("recency_weight 必须在 [0, 1] 范围内")
         if abs(self.recency_weight + self.relevance_weight - 1.0) >= 1e-6:
             raise ConfigError("recency_weight + relevance_weight 必须等于 1.0")
         if not 0.0 <= self.min_budget_ratio <= self.max_budget_ratio <= 1.0:

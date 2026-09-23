@@ -1747,7 +1747,7 @@ from typing import Any
 from ..core import Message
 from ..core.exceptions import ConfigError
 from ..tools.base import BaseTool
-from .base import _SOURCE_TYPES, ContextConfig
+from .base import _SOURCE_TYPES, ContextConfig, ContextPacket
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
 from .experiment import ExperimentAssigner
@@ -1759,11 +1759,16 @@ __all__ = ["ContextBuilder"]
 ```
 
 后续任务追加代码时的**导入增量**（已在各自的 Step 3 中重复列出，此处备查）：
-- Task 8：`import hashlib`（isort 顺序排在 `logging` 之前）、`from ..tools.response import ToolStatus`、并把 `from .base import ...` 扩为 `(_SOURCE_TYPES, ContextConfig, ContextPacket)`
+- Task 8：`import hashlib`（isort 顺序排在 `logging` 之前）、`from ..tools.response import ToolStatus`（`ContextPacket` 已在 Task 7 导入，见下）
 - Task 9：`import math`
 - Task 10：`from .base import ...` 扩为 `(_SOURCE_TYPES, _TEMPLATE_ORDER, ContextConfig, ContextPacket, ContextSection)`
 - Task 11：`from time import perf_counter`、`from typing import TYPE_CHECKING, Any`、`from .base import ...` 扩为 `(_SOURCE_TYPES, _TEMPLATE_ORDER, BuildResult, BuildStats, ContextConfig, ContextPacket, ContextSection)`，并补 `if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
     from .experiment import ExperimentSpec`
+
+⚠️ **`ContextPacket` 必须在 Task 7 就导入**，不能推到 Task 8。理由：`_count_by_source`
+的注解是 `list[ContextPacket]`，而 ruff 的 `F821` 会检查注解里的未定义名字 —— 即使
+`from __future__ import annotations` 把注解变成惰性字符串也照样报（已用 `--isolated` 复现）。
+推到 Task 8 会让 Task 7 过不了本计划自己定的「触碰文件 lint 清零」门槛。
 
 导入区之后追加模块级辅助函数与 `ContextBuilder` 的骨架：
 

@@ -48,6 +48,20 @@ def test_retrieval_cue_raises_complexity():
     assert cued > plain
 
 
+def test_english_retrieval_cue_raises_complexity():
+    plain = _policy().estimate(
+        "configure vector store", history=[], system_instructions=None
+    )
+    cued = _policy().estimate(
+        "based on the docs configure vector store", history=[], system_instructions=None
+    )
+    assert cued > plain
+
+
+def test_policy_exposes_stable_name():
+    assert _policy().name == "heuristic"
+
+
 def test_complexity_is_clamped_to_unit_interval():
     huge = _policy().estimate("如何" + "请" * 500, history=[], system_instructions=None)
     assert 0.0 <= huge <= 1.0

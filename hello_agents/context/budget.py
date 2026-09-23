@@ -51,6 +51,9 @@ class BudgetInfo:
         scaled_max_tokens: 复杂度缩放后的实际预算
         reserved_tokens: 为系统指令预留的 token
         available_tokens: 可供打分包竞争的 token
+
+    不变式：``available_tokens == scaled_max_tokens - reserved_tokens``，
+    由构建方（ContextBuilder）保证。
     """
 
     policy: str
@@ -62,7 +65,13 @@ class BudgetInfo:
 
 
 class BudgetPolicy(Protocol):
-    """复杂度估计策略"""
+    """复杂度估计策略
+
+    实现应提供稳定的 ``name``，用于 ``BudgetInfo.policy`` 的 A/B 归因；
+    缺失时调用方回退为类名。
+    """
+
+    name: str
 
     def estimate(
         self,
@@ -71,7 +80,11 @@ class BudgetPolicy(Protocol):
         history: list[Message],
         system_instructions: str | None,
     ) -> float:
-        """返回 [0.0, 1.0] 的复杂度分数"""
+        """返回 [0.0, 1.0] 的复杂度分数
+
+        实现可以忽略 ``system_instructions``；调用方始终以关键字传入，
+        签名不得收窄。
+        """
         ...
 
 
@@ -80,6 +93,12 @@ class HeuristicBudgetPolicy:
 
     四项因子加权求和，权重和为 1.0：查询长度 0.40、疑问词 0.20、
     历史规模 0.20、检索线索 0.20。
+
+    查询长度以 200 字符、历史规模以 10 轮为饱和点（超出即取满该项），
+    结果 clamp 到 [0.0, 1.0]。
+
+    本实现忽略 ``system_instructions``，但为保持与 ``BudgetPolicy`` 的
+    可替换性，签名不得收窄（调用方始终以关键字传入该参数）。
     """
 
     name = "heuristic"

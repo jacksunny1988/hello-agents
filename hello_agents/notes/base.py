@@ -181,7 +181,9 @@ class Note(NoteMeta):
           回退路径（无 frontmatter / 解析失败）整篇原文一字不动。
         - ``file_path`` 取真实文件名：手改过 frontmatter 的 ``id`` 可能与文件名不一致。
         """
-        meta, body = _split_frontmatter(text.replace("\r\n", "\n").removeprefix("﻿"))
+        meta, body = _split_frontmatter(
+            text.replace("\r\n", "\n").removeprefix("\ufeff")
+        )
         fallback_id = Path(file_path).stem
         created_at = parse_datetime(meta.get("created_at")) or fallback_time
         return cls(

@@ -13,16 +13,16 @@
 
 from collections import OrderedDict
 from time import monotonic
-from typing import Generic, TypeVar
 
 __all__ = ["TTLCache"]
 
-K = TypeVar("K")
-V = TypeVar("V")
 
-
-class TTLCache(Generic[K, V]):
+class TTLCache[K, V]:
     """带 TTL 与 LRU 淘汰的缓存
+
+    统计口径：evictions 只统计容量驱动的淘汰，TTL 过期不增加任何计数；
+    stats() 的 size 可能包含已过期但尚未回收的条目——过期项仅在访问或
+    下一次写入新键时才被清理。
 
     Attributes:
         max_size: 最大条目数

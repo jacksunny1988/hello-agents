@@ -38,6 +38,15 @@ def test_lru_eviction_order():
     assert cache.stats()["evictions"] == 1
 
 
+def test_put_purges_expired_before_evicting():
+    cache = TTLCache(max_size=2, ttl_seconds=0.05)
+    cache.put("a", 1)
+    time.sleep(0.08)
+    cache.put("b", 2)  # "a" 已过期，应被清理而非计入淘汰
+    assert cache.stats()["size"] == 1
+    assert cache.stats()["evictions"] == 0
+
+
 def test_put_overwrites_without_growing():
     cache = TTLCache(max_size=2, ttl_seconds=60)
     cache.put("a", 1)

@@ -202,3 +202,244 @@ def test_build_result_bundles_context_and_stats():
     result = BuildResult(context="ctx", stats=stats)
     assert result.context == "ctx"
     assert result.stats is stats
+
+
+# --- Task 7: 骨架 / token 计数 / 预算 ---
+
+from hello_agents.context.budget import HeuristicBudgetPolicy
+from hello_agents.context.builder import (
+    ContextBuilder,
+    _count_by_source,
+    _parse_timestamp,
+)
+from hello_agents.context.scoring import KeywordOverlapScorer
+
+
+class _FixedPolicy:
+    """恒定返回指定复杂度的策略替身"""
+
+    name = "fixed"
+
+    def __init__(self, complexity: float) -> None:
+        self.complexity = complexity
+
+    def estimate(self, query, *, history, system_instructions) -> float:
+        return self.complexity
+
+
+class _DictCacheScorer:
+    """打分器替身：cache 不是 TTLCache，钉 _cache_counters 的跳过分支"""
+
+    def __init__(self) -> None:
+        self.cache: dict[str, int] = {"hits": 99, "misses": 99}
+
+    def score(self, content: str, query: str) -> float:
+        return 0.5
+
+    def score_many(self, contents: list[str], query: str) -> list[float]:
+        return [0.5] * len(contents)
+
+
+def test_count_tokens_uses_tiktoken():
+    """修复 B10：统一走 tiktoken，不再用中英文字符启发式"""
+    builder = ContextBuilder()
+    text = "用户喜欢深蓝色 hello world"
+    assert builder._count_tokens(text) == len(builder.encoder.encode(text))
+    # F9 加强：钉住 cl100k_base 对固定串的已知 token 数，杀死 len(text) 启发式
+    assert builder._count_tokens(text) == 13
+    assert builder._count_tokens("") == 0
+
+
+def test_budget_scales_with_complexity():
+    config = ContextConfig(
+        max_tokens=1000, min_budget_ratio=0.5, max_budget_ratio=1.0, reserve_ratio=0.2
+    )
+    builder = ContextBuilder(config)
+    simple = builder._compute_budget(config, "你好", [], None)
+    complex_query = "如何根据文档配置向量库" + "详" * 300
+    complex_budget = builder._compute_budget(config, complex_query, [], None)
+    assert simple.scaled_max_tokens < complex_budget.scaled_max_tokens
+    assert simple.requested_max_tokens == 1000
+    assert simple.policy == "heuristic"
+    assert simple.complexity < complex_budget.complexity
+
+
+def test_budget_reserves_ratio_for_system_instructions():
+    """修复 B11：reserve_ratio 必须真正生效"""
+    config = ContextConfig(max_tokens=2000, reserve_ratio=0.3)
+    builder = ContextBuilder(config)
+    info = builder._compute_budget(config, "你好", [], "系统指令")
+    assert info.reserved_tokens == int(info.scaled_max_tokens * 0.3)
+    assert info.available_tokens == info.scaled_max_tokens - info.reserved_tokens
+
+
+def test_budget_uses_injected_policy():
+    config = ContextConfig(max_tokens=1000)
+    builder = ContextBuilder(config, budget_policy=_FixedPolicy(1.0))
+    info = builder._compute_budget(config, "任意查询", [], None)
+    assert info.policy == "fixed"
+    assert info.scaled_max_tokens == 1000
+    assert info.complexity == 1.0
+
+
+def test_budget_formula_pinned_at_low_and_mid_complexity():
+    """修复 F5：钉住缩放公式低端 0.0 与中点 0.5，防退化为 max_ratio * complexity"""
+    config = ContextConfig(
+        max_tokens=1000, min_budget_ratio=0.5, max_budget_ratio=1.0, reserve_ratio=0.2
+    )
+    low = ContextBuilder(config, budget_policy=_FixedPolicy(0.0))
+    low_info = low._compute_budget(config, "任意查询", [], None)
+    assert low_info.scaled_max_tokens == 500
+    mid = ContextBuilder(config, budget_policy=_FixedPolicy(0.5))
+    mid_info = mid._compute_budget(config, "任意查询", [], None)
+    assert mid_info.scaled_max_tokens == 750
+
+
+def test_budget_clamps_complexity_out_of_range():
+    """修复 F7：复杂度钳制到 [0, 1]，scaled 跟钳后值走"""
+    config = ContextConfig(
+        max_tokens=1000, min_budget_ratio=0.5, max_budget_ratio=1.0, reserve_ratio=0.2
+    )
+    over = ContextBuilder(config, budget_policy=_FixedPolicy(2.0))
+    over_info = over._compute_budget(config, "任意查询", [], None)
+    assert over_info.complexity == 1.0
+    assert over_info.scaled_max_tokens == 1000
+    under = ContextBuilder(config, budget_policy=_FixedPolicy(-1.0))
+    under_info = under._compute_budget(config, "任意查询", [], None)
+    assert under_info.complexity == 0.0
+    assert under_info.scaled_max_tokens == 500
+
+
+def test_budget_scaled_max_tokens_is_at_least_one():
+    config = ContextConfig(max_tokens=1, min_budget_ratio=0.1, max_budget_ratio=0.1)
+    builder = ContextBuilder(config)
+    assert builder._compute_budget(config, "你好", [], None).scaled_max_tokens >= 1
+
+
+def test_config_budget_policy_is_used_when_not_injected():
+    config = ContextConfig(budget_policy=_FixedPolicy(0.0))
+    builder = ContextBuilder(config)
+    assert builder.budget_policy.name == "fixed"
+
+
+def test_explicit_policy_beats_config_policy():
+    config = ContextConfig(budget_policy=_FixedPolicy(0.0))
+    builder = ContextBuilder(config, budget_policy=HeuristicBudgetPolicy())
+    assert builder.budget_policy.name == "heuristic"
+
+
+def test_parse_timestamp_accepts_iso_and_datetime():
+    now = datetime.now(tz=UTC)
+    assert _parse_timestamp(now) is now
+    # F2：精确比对而非 year == 2026（今天正是 2026 年，钉不住 fromisoformat）
+    parsed = _parse_timestamp("2026-09-23T10:00:00")
+    assert parsed == datetime(2026, 9, 23, 10, 0, 0, tzinfo=UTC)
+
+
+def test_parse_timestamp_fallback_is_tz_aware_now():
+    """F3：退回值必须是「当前时刻」的 tz-aware UTC，而非任意 datetime"""
+    for raw in (None, "not-a-date"):
+        result = _parse_timestamp(raw)
+        assert isinstance(result, datetime)
+        assert result.tzinfo is UTC
+        delta = abs((result - datetime.now(tz=UTC)).total_seconds())
+        assert delta < 5
+
+
+def test_parse_timestamp_normalizes_naive_to_utc():
+    """F3b：解析处归一，naive 入参出口带 UTC，与 aware 入参结果相等"""
+    naive = datetime.fromisoformat("2026-09-23T10:00:00")
+    aware = datetime(2026, 9, 23, 10, 0, 0, tzinfo=UTC)
+    assert naive.tzinfo is None
+    assert _parse_timestamp(naive) == _parse_timestamp(aware)
+    assert _parse_timestamp(naive) == aware
+    assert _parse_timestamp(naive).tzinfo is UTC
+
+
+def test_count_by_source_always_lists_all_five_types():
+    packets = [
+        ContextPacket(
+            content="a", timestamp=datetime.now(tz=UTC), metadata={"type": "rag"}
+        ),
+        ContextPacket(
+            content="b", timestamp=datetime.now(tz=UTC), metadata={"type": "rag"}
+        ),
+        ContextPacket(content="c", timestamp=datetime.now(tz=UTC)),
+    ]
+    counts = _count_by_source(packets)
+    assert counts == {
+        "system_instruction": 0,
+        "memory": 0,
+        "rag": 2,
+        "history": 0,
+        "custom": 1,
+    }
+
+
+def test_count_by_source_unknown_type_falls_back_to_custom():
+    """F4：未知 type 归入 custom，不得泄漏第六个键"""
+    packets = [
+        ContextPacket(
+            content="a", timestamp=datetime.now(tz=UTC), metadata={"type": "bogus"}
+        ),
+    ]
+    counts = _count_by_source(packets)
+    assert counts == {
+        "system_instruction": 0,
+        "memory": 0,
+        "rag": 0,
+        "history": 0,
+        "custom": 1,
+    }
+    assert len(counts) == 5
+
+
+def test_cache_counters_include_scorer_cache():
+    from hello_agents.context.scoring import EmbeddingSimilarityScorer
+    from hello_agents.memory import TFIDFEmbedding
+
+    scorer = EmbeddingSimilarityScorer(embedding=TFIDFEmbedding(dim=64))
+    builder = ContextBuilder(relevance_scorer=scorer)
+    scorer.score("用户喜欢爬山", "用户喜欢")
+    hits, misses = builder._cache_counters()
+    assert hits + misses > 0
+
+
+def test_cache_counters_include_builder_cache():
+    """F6：builder 自己的 self.cache 计数必须纳入，精确值而非 > 0"""
+    builder = ContextBuilder()
+    builder.cache.put("k", "v")
+    assert builder.cache.get("k") == "v"
+    assert builder.cache.get("missing") is None
+    hits, misses = builder._cache_counters()
+    assert (hits, misses) == (1, 1)
+
+
+def test_cache_counters_skip_scorer_without_cache():
+    """F8②：scorer 无 cache 属性时跳过，不抛且只含 builder 自己的计数"""
+    builder = ContextBuilder(relevance_scorer=KeywordOverlapScorer())
+    builder.cache.put("k", "v")
+    builder.cache.get("k")
+    hits, misses = builder._cache_counters()
+    assert (hits, misses) == (1, 0)
+
+
+def test_cache_counters_skip_non_ttl_scorer_cache():
+    """F8②加强：scorer.cache 不是 TTLCache 时必须跳过，不得当 TTLCache 用"""
+    builder = ContextBuilder(relevance_scorer=_DictCacheScorer())
+    builder.cache.put("k", "v")
+    builder.cache.get("k")
+    hits, misses = builder._cache_counters()
+    assert (hits, misses) == (1, 0)
+
+
+def test_init_raises_config_error_when_tiktoken_unavailable(monkeypatch):
+    """F8①：tiktoken 编码器缺失一律转 ConfigError"""
+    import tiktoken
+
+    def _boom(_name: str):
+        raise RuntimeError("encoder missing")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", _boom)
+    with pytest.raises(ConfigError):
+        ContextBuilder()

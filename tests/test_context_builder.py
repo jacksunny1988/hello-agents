@@ -512,15 +512,32 @@ def test_gather_builds_system_instruction_packet():
     packets = builder._gather("查询", [], "你是助手", [], builder.config)
     assert len(packets) == 1
     assert packets[0].metadata["type"] == "system_instruction"
+    # B6c：priority 属包形状契约，整 dict 钉死防丢字段
+    assert packets[0].metadata == {"type": "system_instruction", "priority": "high"}
     assert packets[0].relevance_score == 1.0
     assert packets[0].token_count == builder._count_tokens("你是助手")
+    # B5 等长对照①：cl100k_base 实测 tokens=5、len=4（「你是助手」4 个 CJK 字符）
+    assert packets[0].token_count == 5
+    assert packets[0].token_count != len(packets[0].content)
 
 
 def test_gather_reuses_cached_system_instruction_packet():
+    """B4：缓存键必须绑定指令本体 —— 同指令复用、异指令不串包
+
+    变异（sha256 指令哈希 → 常量键）会让后一条查询吃到前一条的系统指令，
+    只断言「同指令 is」钉不住串包，故三段缺一不可。
+    """
     builder = ContextBuilder()
     first = builder._gather("查询", [], "你是助手", [], builder.config)
     second = builder._gather("另一查询", [], "你是助手", [], builder.config)
+    # ① 同指令：同一对象，命中缓存
     assert first[0] is second[0]
+    third = builder._gather("第三查询", [], "你是严格的审校员", [], builder.config)
+    # ② 异指令：不得复用
+    assert first[0] is not third[0]
+    # ③ 异指令 content 各自正确（常量键下会串成同一条）
+    assert first[0].content == "你是助手"
+    assert third[0].content == "你是严格的审校员"
 
 
 def test_gather_skips_empty_system_instructions():
@@ -530,29 +547,42 @@ def test_gather_skips_empty_system_instructions():
 
 
 def test_gather_calls_memory_tool_with_real_contract():
-    """修复 B13：action 必须是 recall，且不得传记忆层不识别的参数"""
+    """修复 B13：action 必须是 recall，且不得传记忆层不识别的参数
+
+    B1：limit 必须接到 config.memory_limit —— 故用非默认 3 并断言字面量，
+    自指式 `== builder.config.memory_limit` 在默认配置下与硬编码 10 不可区分。
+    """
     tool = _FakeTool(data={"hits": _memory_hits("用户喜欢爬山")})
-    builder = ContextBuilder(memory_tool=tool)
+    builder = ContextBuilder(memory_tool=tool, config=ContextConfig(memory_limit=3))
     packets = builder._gather("爬山", [], None, [], builder.config)
     payload = tool.calls[0]
     assert payload["action"] == "recall"
     assert payload["query"] == "爬山"
-    assert payload["limit"] == builder.config.memory_limit
+    assert payload["limit"] == 3
     assert "min_importance" not in payload
     assert "min_score" not in payload
     assert packets[0].metadata["type"] == "memory"
     assert packets[0].relevance_score == 0.8
+    # B5：命中包 token_count 必须是 tiktoken 口径
+    assert packets[0].token_count == builder._count_tokens("用户喜欢爬山")
+    # B5 等长对照①：cl100k_base 实测 tokens=8、len=6（6 个 CJK 字符）
+    assert packets[0].token_count == 8
+    assert packets[0].token_count != len(packets[0].content)
 
 
 def test_gather_calls_rag_tool_with_real_contract():
-    """修复 B13：action 必须是 query，条数参数是 top_k"""
+    """修复 B13：action 必须是 query，条数参数是 top_k
+
+    B1：top_k 必须接到 config.rag_limit —— 故用非默认 2 并断言字面量，
+    自指式 `== builder.config.rag_limit` 在默认配置下与硬编码 5 不可区分。
+    """
     tool = _FakeTool(data={"chunks": _memory_hits("向量库配置说明", score=0.9)})
-    builder = ContextBuilder(rag_tool=tool)
+    builder = ContextBuilder(rag_tool=tool, config=ContextConfig(rag_limit=2))
     packets = builder._gather("向量库", [], None, [], builder.config)
     payload = tool.calls[0]
     assert payload["action"] == "query"
     assert payload["question"] == "向量库"
-    assert payload["top_k"] == builder.config.rag_limit
+    assert payload["top_k"] == 2
     assert packets[0].metadata["type"] == "rag"
     # G-h：与 memory 侧 relevance_score == 0.8 对称，钉住分数透传
     assert packets[0].relevance_score == 0.9
@@ -631,6 +661,21 @@ def test_gather_keeps_hits_without_importance_metadata():
     assert len(builder._gather("查询", [], None, [], builder.config)) == 1
 
 
+def test_gather_defaults_missing_content_to_empty_string():
+    """B6b：命中缺 content 键时正文是空串，不是占位文本
+
+    变异 `hit.get("content", "")` → `hit.get("content", "占位")` /
+    `hit.get("content") or "占位"` 都会在缺键时给出占位文本。
+    """
+    hit = _memory_hits("有正文")[0]
+    del hit["content"]
+    tool = _FakeTool(data={"hits": [hit]})
+    builder = ContextBuilder(memory_tool=tool)
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].content == ""
+
+
 def test_gather_leaves_scoreless_hits_unscored():
     """G-c：MemoryItem.to_dict() 不含 score，Task 12 前 RAG 在线路径全是缺分命中
 
@@ -647,6 +692,21 @@ def test_gather_leaves_scoreless_hits_unscored():
     assert packets[0].metadata["source_score"] == 0.0
 
 
+def test_gather_keeps_explicit_zero_score():
+    """B2：显式 0 分不得被 falsy 判断抬成满分
+
+    变异 `float(raw_score)` → `float(raw_score or 1.0)` 会把 0.0 抬成 1.0，
+    因为 0.0 是 falsy。既有 score 取值只覆盖 0.8/0.9/0.05 与「缺键」（走 None
+    分支、不受此变异影响），唯独缺显式 0.0 —— 这里补上。
+    """
+    tool = _FakeTool(data={"hits": _memory_hits("零分命中", score=0.0)})
+    builder = ContextBuilder(memory_tool=tool)
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].relevance_score == 0.0
+    assert packets[0].metadata["source_score"] == 0.0
+
+
 def test_gather_drops_scoreless_hits_when_min_source_score_positive():
     """G-d①：缺 score 按 0.0 过滤，min_source_score>0 时整体丢光（spec 语义）"""
     hits = _memory_hits("缺分命中")
@@ -654,6 +714,17 @@ def test_gather_drops_scoreless_hits_when_min_source_score_positive():
     tool = _FakeTool(data={"chunks": hits})
     builder = ContextBuilder(rag_tool=tool, config=ContextConfig(min_source_score=0.1))
     assert builder._gather("向量库", [], None, [], builder.config) == []
+
+
+def test_gather_skips_history_when_window_is_zero():
+    """B3：history_window=0 是合法配置，语义为「不纳入历史」
+
+    `window <= 0` 是承重护栏：`__post_init__` 只拒负数、0 合法。删掉护栏后
+    `history[-window:]` == `history[-0:]` == `history[0:]` == 全量，语义倒置。
+    """
+    history = [Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(3)]
+    builder = ContextBuilder(config=ContextConfig(history_window=0))
+    assert builder._gather("查询", history, None, [], builder.config) == []
 
 
 def test_gather_trims_history_to_window():
@@ -668,13 +739,23 @@ def test_gather_trims_history_to_window():
 
 
 def test_gather_marks_history_position_and_type():
-    """修复 B14：历史消息用 position 承载新近性，不读 msg.timestamp"""
+    """修复 B14：历史消息用 position 承载新近性，不读 msg.timestamp
+
+    B6a：正文格式是 `{{role}}: {{content}}`，role 前缀必须在串里。
+    """
     history = [Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(3)]
     builder = ContextBuilder()
     packets = builder._gather("查询", history, None, [], builder.config)
     assert [p.metadata["position"] for p in packets] == [0, 1, 2]
     assert all(p.metadata["type"] == "history" for p in packets)
     assert packets[0].relevance_score is None
+    # B6a：完整串钉死，防 role 前缀被去掉
+    assert packets[0].content == "user: 第0轮"
+    # B5：历史包 token_count 必须是 tiktoken 口径
+    assert packets[0].token_count == builder._count_tokens(packets[0].content)
+    # B5 等长对照①：cl100k_base 实测 tokens=6、len=9（"user: 第0轮" 9 个字符）
+    assert packets[0].token_count == 6
+    assert packets[0].token_count != len(packets[0].content)
 
 
 def test_gather_fills_token_count_for_custom_packets():
@@ -682,6 +763,9 @@ def test_gather_fills_token_count_for_custom_packets():
     builder = ContextBuilder()
     packets = builder._gather("查询", [], None, [custom], builder.config)
     assert packets[0].token_count == builder._count_tokens("自定义信息")
+    # B5 等长对照①：cl100k_base 实测 tokens=3、len=5（5 个 CJK 字符）
+    assert packets[0].token_count == 3
+    assert packets[0].token_count != len(packets[0].content)
 
 
 def test_gather_keeps_explicit_token_count_on_custom_packets():

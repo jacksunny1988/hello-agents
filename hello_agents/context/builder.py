@@ -199,13 +199,14 @@ class ContextBuilder:
     def _memory_packets(
         self, user_query: str, config: ContextConfig
     ) -> list[ContextPacket]:
+        """调用记忆工具召回命中；工具调用失败一律降级为空，不向调用方外泄"""
         if self.memory_tool is None:
             return []
         try:
             response = self.memory_tool.run(
                 {"action": "recall", "query": user_query, "limit": config.memory_limit}
             )
-        except Exception as exc:  # noqa: BLE001 - 检索失败一律降级
+        except Exception as exc:  # noqa: BLE001 - 工具调用失败一律降级
             logger.warning("记忆检索失败: %s", exc)
             return []
         if getattr(response, "status", None) == ToolStatus.ERROR:
@@ -217,13 +218,14 @@ class ContextBuilder:
     def _rag_packets(
         self, user_query: str, config: ContextConfig
     ) -> list[ContextPacket]:
+        """调用知识工具检索命中；工具调用失败一律降级为空，不向调用方外泄"""
         if self.rag_tool is None:
             return []
         try:
             response = self.rag_tool.run(
                 {"action": "query", "question": user_query, "top_k": config.rag_limit}
             )
-        except Exception as exc:  # noqa: BLE001 - 检索失败一律降级
+        except Exception as exc:  # noqa: BLE001 - 工具调用失败一律降级
             logger.warning("知识检索失败: %s", exc)
             return []
         if getattr(response, "status", None) == ToolStatus.ERROR:

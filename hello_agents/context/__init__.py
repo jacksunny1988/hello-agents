@@ -14,10 +14,9 @@
     )
 """
 
-from .base import ContextBuilder, ContextConfig, ContextPacket
+from .base import ContextConfig, ContextPacket
 
 __all__ = [
-    "ContextBuilder",
     "ContextConfig",
     "ContextPacket",
 ]

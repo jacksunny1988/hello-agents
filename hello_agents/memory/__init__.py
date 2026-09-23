@@ -12,7 +12,12 @@
 """
 
 from .base import BaseMemory, MemoryConfig, MemoryItem, MemoryType
-from .embedding import BaseEmbedding, TFIDFEmbedding, create_embedding
+from .embedding import (
+    BaseEmbedding,
+    TFIDFEmbedding,
+    cosine_similarity,
+    create_embedding,
+)
 from .manager import MemoryManager
 from .rag import DocumentChunk, DocumentProcessor, RAGPipeline, RAGResult
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
@@ -33,5 +38,6 @@ __all__ = [
     "SemanticMemory",
     "TFIDFEmbedding",
     "WorkingMemory",
+    "cosine_similarity",
     "create_embedding",
 ]

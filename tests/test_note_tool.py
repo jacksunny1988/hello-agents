@@ -165,3 +165,9 @@ def test_磁盘故障报_note_error(tool, monkeypatch):
     assert (
         tool.run({"action": "read", "id": "note_x"}).error_info["code"] == "NOTE_ERROR"
     )
+
+
+def test_action_非字符串报_invalid_param(note_store):
+    tool = NoteTool(store=note_store)
+    response = tool.run({"action": ["create"]})
+    assert response.error_info["code"] == "INVALID_PARAM"

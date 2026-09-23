@@ -51,7 +51,7 @@ class NoteTool(BaseTool):
         """
         params = self._parse_input(input_data, kwargs)
         action = params.get("action", "search")
-        if action not in _ACTIONS:
+        if not isinstance(action, str) or action not in _ACTIONS:
             return _invalid(f"未知 action: {action}，可选 {sorted(_ACTIONS)}")
         try:
             return getattr(self, f"_do_{action}")(params)

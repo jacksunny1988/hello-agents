@@ -141,6 +141,12 @@ class ContextConfig:
                 raise ConfigError(f"{name} 不能为负数")
         if self.cache_ttl_seconds <= 0:
             raise ConfigError("cache_ttl_seconds 必须为正数")
+        if self.experiment is not None:
+            # 局部导入，避免与 experiment 形成模块级循环
+            from .experiment import ExperimentSpec
+
+            if not isinstance(self.experiment, ExperimentSpec):
+                raise ConfigError("experiment 必须是 ExperimentSpec 实例")
 
 
 @dataclass

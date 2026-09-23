@@ -11,7 +11,6 @@ import os
 import re
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 
 from .base import (
     DriftReport,

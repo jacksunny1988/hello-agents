@@ -131,7 +131,7 @@ class NoteMeta:
 
     @classmethod
     def from_index_entry(cls, entry: dict[str, Any]) -> "NoteMeta":
-        """从索引条目反序列化（字段缺失时走兜底，不抛异常）"""
+        """从索引条目反序列化（除 id / file_path 外，字段缺失时走兜底，不抛异常）"""
         return cls(
             id=str(entry["id"]),
             title=_as_str(entry.get("title")) or str(entry["id"]),

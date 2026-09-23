@@ -88,7 +88,7 @@ def test_from_markdown_正文含水平线不被当作围栏():
 
 
 def test_from_markdown_容忍_crlf_与_bom():
-    text = "﻿" + make_note().to_markdown().replace("\n", "\r\n")
+    text = "\ufeff" + make_note().to_markdown().replace("\n", "\r\n")
     note = Note.from_markdown(text, file_path=FILE, fallback_time=STAMP)
     assert note.id == "note_20260923_153000_0"
     assert note.body == BODY

@@ -71,7 +71,7 @@ class NoteTool(BaseTool):
             return getattr(self, f"_do_{action}")(params)
         except NoteNotFoundError as error:
             return ToolResponse.error(code="NOT_FOUND", message=str(error))
-        except Exception as error:  # 文件系统故障不应击穿 Agent 循环
+        except Exception as error:  # 文件系统故障不应击穿 Agent 循环  # noqa: BLE001
             return ToolResponse.error(code="NOTE_ERROR", message=str(error))
 
     def get_parameters(self) -> list[ToolParameter]:

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import yaml
 
-from hello_agents.notes.base import Note, NoteError, NoteNotFoundError, NoteType
+from hello_agents.notes.base import NoteError, NoteNotFoundError, NoteType
 from hello_agents.notes.store import NoteStore
 
 
@@ -61,15 +61,13 @@ def test_create_id_格式为_note_时间戳_序号(note_store, clock):
     assert note.id == "note_20260923_153001_0"
 
 
-def test_create_同一秒内序号递增(note_store, clock):
+def test_create_同一秒内序号递增(note_store, clock, monkeypatch):
     clock.now = datetime(2026, 9, 23, 15, 30, tzinfo=UTC)
 
     def frozen() -> datetime:
         return clock.now
 
-    import hello_agents.notes.store as store_module
-
-    store_module.utcnow = frozen
+    monkeypatch.setattr("hello_agents.notes.store.utcnow", frozen)
     ids = [note_store.create(f"标题{index}").id for index in range(3)]
     assert ids == [
         "note_20260923_153000_0",

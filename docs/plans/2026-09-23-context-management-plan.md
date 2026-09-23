@@ -20,7 +20,8 @@
 | `hello_agents/context/budget.py` | 复杂度估计与预算缩放 | 新建 |
 | `hello_agents/context/scoring.py` | 相关性打分（关键词 / 向量） | 新建 |
 | `hello_agents/context/experiment.py` | 实验声明、稳定分流、配置覆盖 | 新建 |
-| `hello_agents/context/base.py` | 数据类型 + `ContextBuilder` 四阶段编排 | 重写 |
+| `hello_agents/context/base.py` | 共享数据类型与来源/模板常量 | 重写 |
+| `hello_agents/context/builder.py` | `ContextBuilder` 五阶段编排 | 新建（Task 7–11） |
 | `hello_agents/context/__init__.py` | 公开导出 | 重写 |
 | `hello_agents/core/__init__.py` | 补导出 `ConfigError` | 改 1 行 |
 | `hello_agents/memory/__init__.py` | 补导出 `cosine_similarity` | 改 1 行 |
@@ -33,7 +34,7 @@
 | `examples/context_builder_demo.py` | 离线可跑示例 | 新建 |
 | `README.md` | 项目与模块文档 | 补写 |
 
-**依赖方向（无环）**：`base` → `budget` / `scoring` / `cache` / `experiment`；`scoring` → `memory.embedding`。`experiment` 只在 `TYPE_CHECKING` 下引用 `base.ContextConfig`，运行时无环。
+**依赖方向（无环）**：`builder` → `base` / `budget` / `scoring` / `cache` / `experiment`；`base` → `budget`（只用 `BudgetInfo` / `BudgetPolicy` 作注解）；`scoring` → `memory.embedding`。`experiment` 只在 `TYPE_CHECKING` 下引用 `base.ContextConfig`，运行时无环。
 
 **约定**：中文 docstring、PEP 604 类型注解（`str | None`）、**泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）**、`@dataclass`（仅 `core/` 用 pydantic）、ruff（行宽 88；本环境 `requires-python = ">=3.13"` 推出 `target-version = py313`，有效规则集含 `DTZ` / `BLE` / `I` / `F` / `E`（已实测复现））。每个任务结束提交一次，并在收尾时对**本任务触碰的文件**跑 `uv run ruff check` 清零告警。
 
@@ -735,7 +736,7 @@ Expected: FAIL — `ImportError: cannot import name 'BuildResult' from 'hello_ag
 
 - [ ] **Step 3: Write minimal implementation**
 
-用以下内容重写 `hello_agents/context/base.py`（本任务只到数据类型为止；`ContextBuilder` 在 Task 7–10 追加）：
+用以下内容重写 `hello_agents/context/base.py`（本任务只到数据类型为止；`ContextBuilder` 由 Task 7–11 在新建的 `builder.py` 中实现）：
 
 ```python
 """上下文构建
@@ -1296,6 +1297,7 @@ git commit -m "feat: add pluggable relevance scorers with embedding cache"
 
 **Files:**
 - Create: `hello_agents/context/experiment.py`
+- Modify: `hello_agents/context/base.py`（补 `experiment` 的运行时类型校验）
 - Test: `tests/test_context_experiment.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -1407,6 +1409,12 @@ def test_spec_rejects_weights_missing_a_variant():
             variants={"control": {}, "variant_a": {}},
             weights={"control": 1.0},
         )
+
+
+def test_config_rejects_non_spec_experiment():
+    """experiment 必须是 ExperimentSpec 实例，None 表示不做实验"""
+    with pytest.raises(ConfigError):
+        ContextConfig(experiment="not-a-spec")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1546,16 +1554,30 @@ class ExperimentAssigner:
         return {name: raw[name] / total for name in names}
 ```
 
+`experiment.py` 写好之后，回到 `hello_agents/context/base.py` 补上 `experiment` 的运行时类型校验（Task 4 时 `experiment.py` 尚不存在，只能用 `TYPE_CHECKING` 导入，运行时无从校验）。
+
+在 `ContextConfig.__post_init__` 的末尾追加：
+
+```python
+        if self.experiment is not None:
+            from .experiment import ExperimentSpec  # 局部导入，避免与 experiment 形成模块级循环
+
+            if not isinstance(self.experiment, ExperimentSpec):
+                raise ConfigError("experiment 必须是 ExperimentSpec 实例")
+```
+
+局部导入是有意的：`experiment.py` 只在 `TYPE_CHECKING` 下引用 `base.ContextConfig`，运行时无环；但保持 `base.py` 的模块级导入仍写在 `TYPE_CHECKING` 下，可以把改动面控制到最小。`base.py` 原有的 `if TYPE_CHECKING: from .experiment import ExperimentSpec` 块**保持不变**（它供 `experiment: ExperimentSpec | None` 注解使用）。
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_context_experiment.py -v`
-Expected: PASS — 11 passed
+Expected: PASS — 12 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/experiment.py tests/test_context_experiment.py
-git commit -m "feat: add lightweight A/B experiment assigner"
+git add hello_agents/context/experiment.py hello_agents/context/base.py tests/test_context_experiment.py
+git commit -m "feat: add lightweight A/B experiment assigner with config validation"
 ```
 
 ---
@@ -1563,7 +1585,7 @@ git commit -m "feat: add lightweight A/B experiment assigner"
 ## Task 7: ContextBuilder 骨架、token 计数与预算计算
 
 **Files:**
-- Modify: `hello_agents/context/base.py`（在数据类型之后追加）
+- Create: `hello_agents/context/builder.py`
 - Modify: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -1573,7 +1595,7 @@ git commit -m "feat: add lightweight A/B experiment assigner"
 ```python
 # --- Task 7: 骨架 / token 计数 / 预算 ---
 
-from hello_agents.context.base import ContextBuilder, _count_by_source, _parse_timestamp
+from hello_agents.context.builder import ContextBuilder, _count_by_source, _parse_timestamp
 from hello_agents.context.budget import HeuristicBudgetPolicy
 
 
@@ -1690,45 +1712,54 @@ Expected: FAIL — `ImportError: cannot import name 'ContextBuilder'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `hello_agents/context/base.py` 顶部把导入区替换为（新增 `hashlib`、`math`、`perf_counter`、`tiktoken` 与各子模块）：
+创建 `hello_agents/context/builder.py`。数据类型仍在 `base.py`，此处只做导入；`__all__` 只导出 `ContextBuilder`（数据类型由 `base.__all__` 负责）。
+
+**导入区按需逐任务补齐**，不要一次写全——本计划每个任务收尾都要对触碰的文件跑 `ruff check` 清零，提前导入未使用的名字会触发 `F401`。下面是 **Task 7 时点**的精确导入区：
 
 ```python
+"""上下文构建器
+
+编排「实验分流 -> 汇集 -> 选择 -> 组织 -> 压缩」五步，在 token 预算内
+产出上下文字符串与构建统计。
+
+典型用法：
+    from hello_agents.context import ContextBuilder, ContextConfig
+
+    builder = ContextBuilder(ContextConfig(max_tokens=4096))
+    context = builder.build("用户想了解什么？", conversation_history=history)
+    result = builder.build_result("用户想了解什么？", conversation_history=history)
+    print(result.stats.summary())
+"""
+
 from __future__ import annotations
 
-import hashlib
 import logging
-import math
 import tiktoken
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..core import Message
 from ..core.exceptions import ConfigError
 from ..tools.base import BaseTool
-from ..tools.response import ToolStatus
+from .base import _SOURCE_TYPES, ContextConfig
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
 from .experiment import ExperimentAssigner
 from .scoring import KeywordOverlapScorer, RelevanceScorer
 
-if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
-    from .experiment import ExperimentSpec
-
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "BuildResult",
-    "BuildStats",
-    "ContextBuilder",
-    "ContextConfig",
-    "ContextPacket",
-    "ContextSection",
-]
+__all__ = ["ContextBuilder"]
 ```
 
-在 `BuildResult` 定义之后追加模块级辅助函数与 `ContextBuilder` 的骨架：
+后续任务追加代码时的**导入增量**（已在各自的 Step 3 中重复列出，此处备查）：
+- Task 8：`import hashlib`（isort 顺序排在 `logging` 之前）、`from ..tools.response import ToolStatus`、并把 `from .base import ...` 扩为 `(_SOURCE_TYPES, ContextConfig, ContextPacket)`
+- Task 9：`import math`
+- Task 10：`from .base import ...` 扩为 `(_SOURCE_TYPES, _TEMPLATE_ORDER, ContextConfig, ContextPacket, ContextSection)`
+- Task 11：`from time import perf_counter`、`from typing import TYPE_CHECKING, Any`、`from .base import ...` 扩为 `(_SOURCE_TYPES, _TEMPLATE_ORDER, BuildResult, BuildStats, ContextConfig, ContextPacket, ContextSection)`，并补 `if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    from .experiment import ExperimentSpec`
+
+导入区之后追加模块级辅助函数与 `ContextBuilder` 的骨架：
 
 ```python
 def _parse_timestamp(raw: Any) -> datetime:
@@ -1843,7 +1874,7 @@ Expected: PASS — 22 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/builder.py tests/test_context_builder.py
 git commit -m "feat: add ContextBuilder skeleton with tiktoken counting and budget scaling"
 ```
 
@@ -1852,7 +1883,7 @@ git commit -m "feat: add ContextBuilder skeleton with tiktoken counting and budg
 ## Task 8: 汇集阶段（Gather）
 
 **Files:**
-- Modify: `hello_agents/context/base.py`（追加 `_system_packet` / `_hits_to_packets` / `_memory_packets` / `_rag_packets` / `_history_packets` / `_gather`）
+- Modify: `hello_agents/context/builder.py`（追加 `_system_packet` / `_hits_to_packets` / `_memory_packets` / `_rag_packets` / `_history_packets` / `_gather`）
 - Modify: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -2029,6 +2060,8 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_g
 
 - [ ] **Step 3: Write minimal implementation**
 
+**先补齐导入区**：加一行 `import hashlib`（isort 顺序排在 `import logging` 之前）、加一行 `from ..tools.response import ToolStatus`，并把 `from .base import _SOURCE_TYPES, ContextConfig` 扩为 `from .base import _SOURCE_TYPES, ContextConfig, ContextPacket`。
+
 在 `ContextBuilder` 的 `_cache_counters` 之后追加：
 
 ```python
@@ -2168,7 +2201,7 @@ Expected: PASS — 37 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/builder.py tests/test_context_builder.py
 git commit -m "feat: implement gather stage with real tool contracts"
 ```
 
@@ -2181,7 +2214,7 @@ git commit -m "feat: implement gather stage with real tool contracts"
 > （Task 4 只写了 `UTC, datetime`，因为那时 `timedelta` 尚未被使用，留着会触发 F401）。
 
 **Files:**
-- Modify: `hello_agents/context/base.py`（追加 `_calculate_recency` / `_recency_of` / `_select`）
+- Modify: `hello_agents/context/builder.py`（追加 `_calculate_recency` / `_recency_of` / `_select`）
 - Modify: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -2333,6 +2366,8 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_s
 
 - [ ] **Step 3: Write minimal implementation**
 
+**先补齐导入区**：加一行 `import math`（isort 顺序：`hashlib`、`logging`、`math`、`tiktoken`）。
+
 在 `ContextBuilder` 的 `_gather` 之后追加：
 
 ```python
@@ -2440,7 +2475,7 @@ Expected: PASS — 46 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/builder.py tests/test_context_builder.py
 git commit -m "feat: implement select stage with budget, relevance and position-based recency"
 ```
 
@@ -2449,7 +2484,7 @@ git commit -m "feat: implement select stage with budget, relevance and position-
 ## Task 10: 组织与压缩阶段（Structure / Compress）
 
 **Files:**
-- Modify: `hello_agents/context/base.py`（追加 `_structure` / `_order` / `_render` / `_compress` / `_truncate_section` / `_truncate_text`）
+- Modify: `hello_agents/context/builder.py`（追加 `_structure` / `_order` / `_render` / `_compress` / `_truncate_section` / `_truncate_text`）
 - Modify: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -2620,11 +2655,13 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute '_s
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `hello_agents/context/base.py` 的常量区补上分隔符余量常量（渲染时段间会插入 `\n\n`，压缩预算需预留）：
+在 `hello_agents/context/builder.py` 的常量区（`logger` / `__all__` 之后）补上分隔符余量常量（渲染时段间会插入 `\n\n`，压缩预算需预留）：
 
 ```python
 _SEPARATOR_MARGIN = 4
 ```
+
+**先补齐导入区**：把 `from .base import _SOURCE_TYPES, ContextConfig, ContextPacket` 扩为 `from .base import _SOURCE_TYPES, _TEMPLATE_ORDER, ContextConfig, ContextPacket, ContextSection`。
 
 在 `ContextBuilder` 的 `_select` 之后追加：
 
@@ -2764,7 +2801,7 @@ Expected: PASS — 59 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/builder.py tests/test_context_builder.py
 git commit -m "feat: implement structure and structure-aware compression"
 ```
 
@@ -2773,7 +2810,7 @@ git commit -m "feat: implement structure and structure-aware compression"
 ## Task 11: 编排入口与统计
 
 **Files:**
-- Modify: `hello_agents/context/base.py`（追加 `build_result` / `build`）
+- Modify: `hello_agents/context/builder.py`（追加 `build_result` / `build`）
 - Modify: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -2908,6 +2945,13 @@ Expected: FAIL — `AttributeError: 'ContextBuilder' object has no attribute 'bu
 
 - [ ] **Step 3: Write minimal implementation**
 
+**先补齐导入区**：加 `from time import perf_counter`（isort 顺序排在 `datetime` 之后）、把 `from typing import Any` 扩为 `from typing import TYPE_CHECKING, Any`、把 `from .base import ...` 扩为 `from .base import _SOURCE_TYPES, _TEMPLATE_ORDER, BuildResult, BuildStats, ContextConfig, ContextPacket, ContextSection`，并补上：
+
+```python
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    from .experiment import ExperimentSpec
+```
+
 在 `ContextBuilder` 的 `_compress` 之后追加：
 
 ```python
@@ -3034,7 +3078,7 @@ Expected: PASS — 69 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add hello_agents/context/base.py tests/test_context_builder.py
+git add hello_agents/context/builder.py tests/test_context_builder.py
 git commit -m "feat: add build_result orchestration with BuildStats and logging"
 ```
 
@@ -3174,11 +3218,11 @@ Expected: FAIL — `AssertionError: ContextBuilder 未导出`
 from .base import (
     BuildResult,
     BuildStats,
-    ContextBuilder,
     ContextConfig,
     ContextPacket,
     ContextSection,
 )
+from .builder import ContextBuilder
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
 from .experiment import ExperimentAssigner, ExperimentSpec

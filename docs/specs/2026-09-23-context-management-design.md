@@ -26,7 +26,7 @@
 | P1 | 动态调整 token 预算（按任务复杂度） | `hello_agents/context/budget.py` |
 | P2 | 相关性计算优化（关键词重叠 → 向量相似度） | `hello_agents/context/scoring.py` |
 | P3 | 缓存机制（系统指令 / 知识库内容免重复计算） | `hello_agents/context/cache.py` |
-| P4 | 监控与日志（选中数量、token 使用率等构建统计） | `hello_agents/context/base.py`（`BuildStats` + `logging`） |
+| P4 | 监控与日志（选中数量、token 使用率等构建统计） | `base.py`（`BuildStats`）+ `builder.py`（`logging`） |
 | P5 | A/B 测试（相关性权重、新近性权重等关键参数） | `hello_agents/context/experiment.py` |
 
 ### 1.3 非目标
@@ -77,14 +77,17 @@
 ```
 hello_agents/context/
 ├── __init__.py       中文模块 docstring +「典型用法：」+ 按字母序 __all__
-├── base.py           编排器与核心数据类型（P4 落点）
+├── base.py           共享数据类型与来源/模板常量（P4 的 BuildStats 落点）
+├── builder.py        ContextBuilder 五阶段编排（P4 的 logging 落点）
 ├── budget.py         P1 动态 token 预算
 ├── scoring.py        P2 相关性打分
 ├── cache.py          P3 TTL + LRU 缓存
 └── experiment.py     P5 轻量 A/B
 ```
 
-**为何按横切能力而非流水线阶段拆**：`cache`、`experiment` 是横切关注点，贯穿 Gather/Select/Structure/Compress 多个阶段，塞进任一阶段文件都会造成职责混杂；而 `ContextPacket` / `BuildStats` 等跨阶段共享类型也需要稳定归属。按能力拆后每个文件 80–450 行，单一职责，测试文件可一一对应。
+**为何按横切能力而非流水线阶段拆**：`cache`、`experiment` 是横切关注点，贯穿 Gather/Select/Structure/Compress 多个阶段，塞进任一阶段文件都会造成职责混杂；而 `ContextPacket` / `BuildStats` 等跨阶段共享类型也需要稳定归属。按能力拆后每个文件约 100–450 行，单一职责，测试文件可一一对应。
+
+**数据契约与流程编排分开成两个模块**（`base.py` / `builder.py`）：两者的变更原因不同——数据类型随**数据形状**变，编排器随**构建流程**变；分开后仅需要 `ContextConfig` / `ContextPacket` 的消费方（包 `__init__` 导出、实验参数覆盖、类型使用者）不必陪跑 `tiktoken` 等编排期依赖。这也是让每个文件都落在上述行数口径内的必要前提：两者合并会到约 690 行。
 
 ### 3.2 各单元职责边界
 
@@ -98,9 +101,9 @@ hello_agents/context/
 | `scoring.EmbeddingSimilarityScorer` | 向量余弦相似度 | 同上 | `memory.embedding`、`cache.TTLCache` |
 | `experiment.ExperimentSpec` | 声明实验名与变体参数覆盖 | 构造即声明 | 无 |
 | `experiment.ExperimentAssigner` | 按 unit_id 稳定分流并生成配置副本 | `assign` / `apply` | `base.ContextConfig` |
-| `base.ContextBuilder` | 编排四阶段，产出上下文与统计 | `build` / `build_result` | 上述全部 + `tools.BaseTool` |
+| `builder.ContextBuilder` | 编排五阶段，产出上下文与统计 | `build` / `build_result` | 上述全部 + `base` + `tools.BaseTool` |
 
-依赖方向单一：`base` → `budget` / `scoring` / `cache` / `experiment`；`scoring` → `memory.embedding`。`memory` 与 `tools` 均不反向依赖 `context`，无循环。
+依赖方向单一：`builder` → `base` / `budget` / `scoring` / `cache` / `experiment`；`base` → `budget`（仅用 `BudgetInfo` / `BudgetPolicy` 作注解）；`scoring` → `memory.embedding`。`memory` 与 `tools` 均不反向依赖 `context`，无循环。
 
 ### 3.3 复用的既有实现（不重写）
 
@@ -248,9 +251,11 @@ bucket = int.from_bytes(digest[:8], "big") / 2**64      # 落入 [0, 1)
 **可覆盖的 `ContextConfig` 字段**（白名单，共 12 个）：
 `recency_weight`、`relevance_weight`、`min_relevance`、`max_tokens`、`reserve_ratio`、`min_budget_ratio`、`max_budget_ratio`、`history_window`、`memory_limit`、`rag_limit`、`enable_compression`、`log_stats`。
 
-`apply()` 用 `dataclasses.replace(config, **overrides)` 生成副本，**之后**重跑 `ContextConfig.__post_init__` 的全部校验（含 `recency_weight + relevance_weight == 1.0`）。字段名不在白名单内 → 抛 `ConfigError`。
+`apply()` 用 `dataclasses.replace(config, **overrides)` 生成副本，**之后**重跑 `ContextConfig.__post_init__` 的全部校验（含权重各自的 `[0,1]` 范围与 `recency_weight + relevance_weight == 1.0`）。字段名不在白名单内 → 抛 `ConfigError`。
 
-### 4.5 `hello_agents/context/base.py`
+**校验责任分工**：`ExperimentSpec` 自身负责「实验声明」的校验（实验名非空、变体非空、覆盖字段名在白名单内、`weights` 覆盖全部变体）；`ContextConfig.__post_init__` 负责「配置取值」的校验，并额外要求 `experiment` 为 `None` 或 `ExperimentSpec` 实例——这一条由 Task 6 落地（Task 4 时 `experiment.py` 尚不存在，只能用 `TYPE_CHECKING` 导入，运行时无从校验）。
+
+### 4.5 `hello_agents/context/base.py`（数据类型）与 `hello_agents/context/builder.py`（编排器）
 
 ```python
 @dataclass
@@ -357,6 +362,8 @@ class ContextBuilder:
 
 构造参数优先级：显式传入的 `budget_policy` / `relevance_scorer` > `config.budget_policy` > 模块默认实现。
 
+**文件归属**：`ContextPacket` / `ContextSection` / `ContextConfig` / `BuildStats` / `BuildResult` 五个数据类型与 `_SOURCE_TYPES` / `_TEMPLATE_ORDER` 两个契约常量放在 `base.py`；`ContextBuilder` 及其模块级辅助函数 `_parse_timestamp` / `_count_by_source` 放在 `builder.py`。`builder.py` 从 `base.py` 导入类型，反向不成立，依赖单向无环。包 `__init__.py` 从两处重导出，对使用者透明。
+
 ### 4.6 来源类型与模板路由
 
 `metadata["type"]` 标准化为五个取值：`system_instruction`、`memory`、`rag`、`history`、`custom`。
@@ -450,7 +457,8 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 
 | 情形 | 处理 | 是否向调用方抛出 |
 |---|---|---|
-| 配置参数非法（权重和 ≠ 1.0、比例越界、负数 limit 等） | 抛 `ConfigError` | 是（`__init__` / `build_result` 入口） |
+| 配置参数非法（**单个权重越界**、权重和 ≠ 1.0、比例越界、负数 limit 等） | 抛 `ConfigError` | 是（`__init__` / `build_result` 入口） |
+| `experiment` 不是 `ExperimentSpec` 实例（含 `None` 以外的非法类型） | 抛 `ConfigError` | 是（`__init__`，自 Task 6 起可校验） |
 | 实验变体覆盖了白名单外的字段名 | 抛 `ConfigError` | 是（`ExperimentAssigner.apply`） |
 | 实验变体覆盖后配置非法（如权重和被改坏） | 抛 `ConfigError` | 是 |
 | 工具调用抛异常，或返回 `ToolResponse.status == ERROR` | `logger.warning` + 跳过该来源，其余来源照常 | 否 |
@@ -529,7 +537,8 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 | `hello_agents/context/budget.py` | 新建 |
 | `hello_agents/context/scoring.py` | 新建 |
 | `hello_agents/context/experiment.py` | 新建 |
-| `hello_agents/context/base.py` | 重写（修复 B1–B14，接入 P1–P5） |
+| `hello_agents/context/base.py` | 重写为纯数据类型（修复 B8/B12） |
+| `hello_agents/context/builder.py` | 新建（承载 ContextBuilder，修复 B1–B7、B9–B11、B13–B14） |
 | `hello_agents/context/__init__.py` | 重写（中文 docstring +「典型用法：」+ 按字母序 `__all__`） |
 | `hello_agents/tools/builtin/rag_tool.py` | 1 处：`data["chunks"]` 改为 `chunk.to_dict() \| {"score": chunk.score}`（修复 B15） |
 | `hello_agents/memory/__init__.py` | 1 行：`__all__` 补导出 `cosine_similarity` |

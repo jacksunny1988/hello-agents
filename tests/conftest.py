@@ -28,3 +28,17 @@ def manager(config, embedding) -> MemoryManager:
     mgr = MemoryManager(config=config, embedding=embedding)
     yield mgr
     mgr.close()
+
+
+from hello_agents.notes.base import NoteConfig
+from hello_agents.notes.store import NoteStore
+
+
+@pytest.fixture
+def note_config(tmp_path) -> NoteConfig:
+    return NoteConfig(notes_dir=tmp_path / "notes")
+
+
+@pytest.fixture
+def note_store(note_config) -> NoteStore:
+    return NoteStore(config=note_config)

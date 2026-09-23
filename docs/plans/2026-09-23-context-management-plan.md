@@ -258,6 +258,8 @@ git commit -m "feat: add TTLCache with TTL expiry and LRU eviction"
 ```python
 """预算策略测试：复杂度启发式与缩放公式"""
 
+import pytest
+
 from hello_agents.context.budget import BudgetInfo, HeuristicBudgetPolicy
 from hello_agents.core import Message, MessageRole
 
@@ -279,41 +281,51 @@ def test_long_query_raises_complexity():
 
 
 def test_interrogative_marker_raises_complexity():
-    plain = _policy().estimate("配置向量库", history=[], system_instructions=None)
+    # 等长对照，仅疑问词不同
+    plain = _policy().estimate("配置配置向量库", history=[], system_instructions=None)
     asking = _policy().estimate("如何配置向量库", history=[], system_instructions=None)
-    assert asking > plain
+    assert asking - plain == pytest.approx(0.20)
 
 
 def test_english_question_word_matches_as_whole_word():
-    """`how` 不应在 `show` 中误命中"""
-    hit = _policy().estimate("how to configure", history=[], system_instructions=None)
-    miss = _policy().estimate("show the config", history=[], system_instructions=None)
-    assert hit > miss
+    """`how` 作为整词命中，且不应在 `show` 中误命中"""
+    matched = _policy().estimate("how", history=[], system_instructions=None)
+    control = _policy().estimate("sho", history=[], system_instructions=None)
+    assert matched - control == pytest.approx(0.20)
+
+    # 等长对照：`show` 含 `how` 子串，但不应命中
+    embedded = _policy().estimate("show", history=[], system_instructions=None)
+    embedded_control = _policy().estimate("shou", history=[], system_instructions=None)
+    assert embedded - embedded_control == pytest.approx(0.0)
 
 
 def test_history_size_raises_complexity():
-    history = [
-        Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(10)
-    ]
+    history = [Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(10)]
     empty = _policy().estimate("配置向量库", history=[], system_instructions=None)
     full = _policy().estimate("配置向量库", history=history, system_instructions=None)
     assert full > empty
 
 
 def test_retrieval_cue_raises_complexity():
-    plain = _policy().estimate("配置向量库", history=[], system_instructions=None)
-    cued = _policy().estimate("根据文档配置向量库", history=[], system_instructions=None)
-    assert cued > plain
+    # 等长对照，仅线索词不同
+    plain = _policy().estimate(
+        "配置配置配置向量库", history=[], system_instructions=None
+    )
+    cued = _policy().estimate(
+        "根据文档配置向量库", history=[], system_instructions=None
+    )
+    assert cued - plain == pytest.approx(0.20)
 
 
 def test_english_retrieval_cue_raises_complexity():
+    # 等长对照：仅线索词不同，长度因子抵消
     plain = _policy().estimate(
-        "configure vector store", history=[], system_instructions=None
+        "zzzzzzzz the docs configure vector store", history=[], system_instructions=None
     )
     cued = _policy().estimate(
         "based on the docs configure vector store", history=[], system_instructions=None
     )
-    assert cued > plain
+    assert cued - plain == pytest.approx(0.20)
 
 
 def test_policy_exposes_stable_name():

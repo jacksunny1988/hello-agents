@@ -66,6 +66,8 @@ class KeywordOverlapScorer:
         content_tokens = _tokenize(content)
         union = content_tokens | query_tokens
         if not union:
+            # 死代码兜底：上一行 query_tokens 非空，则 union 必非空。
+            # 保留是为防 ZeroDivisionError（两道防护全被拆掉时的最后防线）。
             return 0.0
         return len(content_tokens & query_tokens) / len(union)
 
@@ -93,8 +95,8 @@ class EmbeddingSimilarityScorer:
     def _embed_many(self, texts: list[str]) -> list[list[float]]:
         """批量取向量，命中缓存的文本不重复嵌入
 
-        后端必须为每条文本返回一个向量；数量不足时抛 RuntimeError，
-        绝不静默过滤——否则 score_many 的 query/contents 会错位，
+        后端必须为每条缺失文本恰好返回一个向量；数量不匹配时抛 RuntimeError，
+        绝不静默过滤或截断——否则 score_many 的 query/contents 会错位，
         分数张冠李戴比抛异常更糟。
         """
         keys = [_cache_key(text) for text in texts]
@@ -102,7 +104,18 @@ class EmbeddingSimilarityScorer:
         missing = [index for index, vector in enumerate(vectors) if vector is None]
         if missing:
             computed = self.embedding.embed_texts([texts[index] for index in missing])
-            for index, vector in zip(missing, computed):
+            if len(computed) < len(missing):
+                raise RuntimeError(
+                    f"embedding 后端返回向量数量不足："
+                    f"期望 {len(missing)} 个新向量，实际 {len(computed)}"
+                )
+            if len(computed) > len(missing):
+                # 超额同样有害：zip 会把多余向量错配给 missing 下标，静默张冠李戴
+                raise RuntimeError(
+                    f"embedding 后端返回向量数量超额："
+                    f"期望 {len(missing)} 个新向量，实际 {len(computed)}"
+                )
+            for index, vector in zip(missing, computed, strict=True):
                 vectors[index] = vector
                 self.cache.put(keys[index], vector)
         resolved: list[list[float]] = []

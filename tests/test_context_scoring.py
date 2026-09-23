@@ -53,6 +53,21 @@ class _EmptyBatchEmbedding(TFIDFEmbedding):
         return []
 
 
+class _OverBatchEmbedding(TFIDFEmbedding):
+    """返回超额向量的后端，用于验证数量契约的对称防护（R2）"""
+
+    def __init__(self, dim: int = 64) -> None:
+        super().__init__(dim=dim)
+        self.calls = 0
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        vectors = super().embed_texts(texts)
+        # 故意多还一个向量，模拟后端把缓存命中项也一并返回
+        extra = vectors[0] if vectors else [0.0] * self.dim
+        return [*vectors, extra]
+
+
 class _FixedEmbedding(TFIDFEmbedding):
     """按文本返回固定向量的后端，用于验证余弦钳位到 [0, 1]"""
 
@@ -87,6 +102,15 @@ def test_keyword_scorer_returns_zero_for_empty_query():
     # 删掉早退分支结果不变——本用例钉不住早退分支本身。
     scorer = KeywordOverlapScorer()
     assert scorer.score("任意内容", "") == 0.0
+
+
+def test_keyword_scorer_both_empty_inputs_return_zero():
+    """双空输入恒 0.0；与空 query 用例合看，可杀掉「两道防护全删」（R3）
+
+    单独删 `if not query_tokens` 或 `if not union` 结果都不变；
+    两道全删时本输入会除零，本用例因此可观测防护整体被拆掉。
+    """
+    assert KeywordOverlapScorer().score("", "") == 0.0
 
 
 def test_keyword_scorer_scores_english_overlap():
@@ -206,6 +230,16 @@ def test_embedding_scorer_clamps_negative_cosine_to_zero():
     assert scorer.score("同向内容", "查询") == pytest.approx(1.0)
 
 
+def test_embedding_scorer_clamps_unity_cosine_rounding_overflow():
+    """浮点自比余弦可略大于 1（如 1.0000000000000002），必须被 min(1.0, …) 钳住
+
+    不能用 pytest.approx(1.0) —— 默认 abs=1e-12 会吞掉 2ulp，杀不掉「删 min(1.0)」。
+    """
+    embedding = _FixedEmbedding({"查询": [1.0, 1.0, 1.0], "同": [1.0, 1.0, 1.0]})
+    scorer = EmbeddingSimilarityScorer(embedding=embedding)
+    assert scorer.score("同", "查询") == 1.0
+
+
 def test_embedding_scorer_rejects_short_embedding_batch():
     """后端返回不足额向量时必须抛错，绝不静默截断/错位（C7）"""
     embedding = _ShortBatchEmbedding(dim=64)
@@ -224,6 +258,17 @@ def test_embedding_scorer_rejects_empty_embedding_batch_with_partial_cache():
     scorer.score("内容甲", "无关查询")
     scorer.embedding = embedding
     with pytest.raises(RuntimeError, match="向量数量不足"):
+        scorer.score_many(["内容甲", "内容乙"], "查询")
+
+
+def test_embedding_scorer_rejects_over_batch_embedding():
+    """后端多还向量时同样必须响亮失败（R2）
+
+    若 zip 静默截断，多余向量会把错误向量配给 missing 下标，分数错位无声。
+    """
+    embedding = _OverBatchEmbedding(dim=64)
+    scorer = EmbeddingSimilarityScorer(embedding=embedding)
+    with pytest.raises(RuntimeError, match="向量数量超额"):
         scorer.score_many(["内容甲", "内容乙"], "查询")
 
 

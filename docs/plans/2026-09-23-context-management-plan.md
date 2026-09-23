@@ -90,6 +90,15 @@ def test_lru_eviction_order():
     assert cache.stats()["evictions"] == 1
 
 
+def test_put_purges_expired_before_evicting():
+    cache = TTLCache(max_size=2, ttl_seconds=0.05)
+    cache.put("a", 1)
+    time.sleep(0.08)
+    cache.put("b", 2)  # "a" 已过期，应被清理而非计入淘汰
+    assert cache.stats()["size"] == 1
+    assert cache.stats()["evictions"] == 0
+
+
 def test_put_overwrites_without_growing():
     cache = TTLCache(max_size=2, ttl_seconds=60)
     cache.put("a", 1)
@@ -143,6 +152,10 @@ __all__ = ["TTLCache"]
 
 class TTLCache[K, V]:
     """带 TTL 与 LRU 淘汰的缓存
+
+    统计口径：evictions 只统计容量驱动的淘汰，TTL 过期不增加任何计数；
+    stats() 的 size 可能包含已过期但尚未回收的条目——过期项仅在访问或
+    下一次写入新键时才被清理。
 
     Attributes:
         max_size: 最大条目数
@@ -221,7 +234,7 @@ class TTLCache[K, V]:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_context_cache.py -v`
-Expected: PASS — 6 passed
+Expected: PASS — 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -341,7 +354,18 @@ from ..core import Message
 
 __all__ = ["BudgetInfo", "BudgetPolicy", "HeuristicBudgetPolicy"]
 
-_INTERROGATIVE_CN = ("如何", "为何", "为什么", "怎么", "怎样", "多少", "哪些", "哪个", "什么", "吗")
+_INTERROGATIVE_CN = (
+    "如何",
+    "为何",
+    "为什么",
+    "怎么",
+    "怎样",
+    "多少",
+    "哪些",
+    "哪个",
+    "什么",
+    "吗",
+)
 _INTERROGATIVE_EN = re.compile(r"\b(what|why|how|which|when|where)\b", re.IGNORECASE)
 _RETRIEVAL_CN = ("根据", "依据", "文档", "参考", "手册", "资料")
 _RETRIEVAL_EN = re.compile(r"\b(based on|according to)\b", re.IGNORECASE)

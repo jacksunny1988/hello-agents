@@ -1142,3 +1142,1456 @@ uv run ruff check hello_agents/notes tests/test_note_search.py
 git add hello_agents/notes/search.py tests/test_note_search.py
 git commit -m "feat: add zero-dependency keyword scoring for note search"
 ```
+
+---
+
+## Task 4: `notes/store.py` 的 CRUD 与索引协同
+
+**Files:**
+- Create: `hello_agents/notes/store.py`（本任务只写 CRUD 与私有辅助）
+- Modify: `tests/conftest.py`（追加 2 个夹具）
+- Test: `tests/test_note_store.py`
+
+**Interfaces:**
+- Consumes: `base`（`Note` / `NoteConfig` / `NoteError` / `NoteMeta` / `NoteNotFoundError` / `NoteType` / `utcnow`）、`index.NoteIndex`
+- Produces: `class NoteStore(config: NoteConfig | None = None)`，方法 `config`（property）、`create(title, body="", *, type=NoteType.GENERAL, tags=None, note_id=None) -> Note`、`read(note_id) -> Note`、`update(note_id, *, title=None, body=None, type=None, tags=None) -> Note`、`delete(note_id) -> bool`、`exists(note_id) -> bool`
+- 契约：每个公开操作先 `_sync()`（L1 集合级对齐）；`read` / `update` 做 L2 单条级修正；自动修复**绝不改写 `.md`**；`update` 全参数为 `None` 时是 no-op
+
+- [ ] **Step 1: 追加 conftest 夹具**
+
+在 `tests/conftest.py` 末尾追加（**用子模块路径导入**，`hello_agents.notes` 的公开导出在 Task 6 才定稿）：
+
+```python
+from hello_agents.notes.base import NoteConfig
+from hello_agents.notes.store import NoteStore
+
+
+@pytest.fixture
+def note_config(tmp_path) -> NoteConfig:
+    return NoteConfig(notes_dir=tmp_path / "notes")
+
+
+@pytest.fixture
+def note_store(note_config) -> NoteStore:
+    return NoteStore(config=note_config)
+```
+
+- [ ] **Step 2: 写失败测试**
+
+创建 `tests/test_note_store.py`：
+
+```python
+"""NoteStore 测试：CRUD / 原子写 / 索引漂移 L1-L2"""
+
+import json
+from datetime import UTC, datetime, timedelta
+
+import pytest
+import yaml
+
+from hello_agents.notes.base import Note, NoteError, NoteNotFoundError, NoteType
+from hello_agents.notes.store import NoteStore
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """可控时钟：每次调用前进 1 秒，避免依赖系统时钟精度"""
+
+    def tick() -> datetime:
+        tick.now += timedelta(seconds=1)
+        return tick.now
+
+    tick.now = datetime(2026, 9, 23, 15, 30, tzinfo=UTC)
+    monkeypatch.setattr("hello_agents.notes.store.utcnow", tick)
+    return tick
+
+
+def write_note(note_config, name: str, updated: str, **fields) -> None:
+    """直接手写一个笔记文件（用于构造确定性的时间戳与漂移场景）"""
+    note_config.notes_dir.mkdir(parents=True, exist_ok=True)
+    tags = ", ".join(fields.get("tags") or [])
+    text = (
+        "---\n"
+        f"id: {name}\n"
+        f"title: {fields.get('title', name)}\n"
+        f"type: {fields.get('type', 'general')}\n"
+        f"tags: [{tags}]\n"
+        f"created_at: {updated}\n"
+        f"updated_at: {updated}\n"
+        "---\n\n"
+        f"{fields.get('body', '正文')}\n"
+    )
+    (note_config.notes_dir / f"{name}.md").write_text(text, encoding="utf-8")
+
+
+def test_create_写文件并登记索引(note_store, note_config):
+    note = note_store.create("项目进展", "## 完成情况\n\n已完成。", tags=["phase1"])
+    text = (note_config.notes_dir / note.file_path).read_text(encoding="utf-8")
+    assert yaml.safe_load(text.partition("\n---\n")[0][4:])["title"] == "项目进展"
+    assert json.loads(note_config.index_path.read_text(encoding="utf-8"))[note.id]["tags"] == ["phase1"]
+
+
+def test_create_自动建目录(note_config):
+    assert not note_config.notes_dir.exists()
+    NoteStore(note_config).create("标题")
+    assert note_config.notes_dir.is_dir()
+
+
+def test_create_id_格式为_note_时间戳_序号(note_store, clock):
+    note = note_store.create("标题")
+    assert note.id == "note_20260923_153001_0"
+
+
+def test_create_同一秒内序号递增(note_store, clock):
+    clock.now = datetime(2026, 9, 23, 15, 30, tzinfo=UTC)
+
+    def frozen() -> datetime:
+        return clock.now
+
+    import hello_agents.notes.store as store_module
+
+    store_module.utcnow = frozen
+    ids = [note_store.create(f"标题{index}").id for index in range(3)]
+    assert ids == [
+        "note_20260923_153000_0",
+        "note_20260923_153000_1",
+        "note_20260923_153000_2",
+    ]
+
+
+def test_create_指定已存在的_id_抛_note_error(note_store):
+    note = note_store.create("标题")
+    with pytest.raises(NoteError):
+        note_store.create("另一条", note_id=note.id)
+
+
+def test_create_不覆盖目录里的手写同名文件(note_store, note_config):
+    write_note(note_config, "note_x", "2026-09-23T15:30:00+00:00", title="手写的")
+    with pytest.raises(NoteError):
+        note_store.create("新标题", note_id="note_x")
+
+
+def test_create_空标题抛_note_error(note_store):
+    with pytest.raises(NoteError):
+        note_store.create("   ")
+
+
+def test_read_返回正文(note_store):
+    note = note_store.create("标题", "## 结论\n\n锁定 httpx<0.28。")
+    assert note_store.read(note.id).body == "## 结论\n\n锁定 httpx<0.28。"
+
+
+def test_read_不存在抛_note_not_found(note_store):
+    with pytest.raises(NoteNotFoundError):
+        note_store.read("note_missing")
+
+
+def test_read_空文件与只有_frontmatter_的文件不崩(note_store, note_config):
+    note_config.notes_dir.mkdir(parents=True, exist_ok=True)
+    (note_config.notes_dir / "empty.md").write_text("", encoding="utf-8")
+    (note_config.notes_dir / "head-only.md").write_text(
+        "---\ntitle: 只有头\n---\n", encoding="utf-8"
+    )
+    assert note_store.read("empty").body == ""
+    assert note_store.read("head-only").title == "只有头"
+    assert note_store.read("head-only").body == ""
+
+
+def test_read_做_l2_修正(note_store, note_config):
+    note = note_store.create("旧标题")
+    path = note_config.notes_dir / note.file_path
+    path.write_text(path.read_text(encoding="utf-8").replace("旧标题", "新标题"), encoding="utf-8")
+    assert note_store.read(note.id).title == "新标题"
+    index = json.loads(note_config.index_path.read_text(encoding="utf-8"))
+    assert index[note.id]["title"] == "新标题"
+
+
+def test_update_只改传入字段并刷新_updated_at(note_store, clock):
+    note = note_store.create("标题", "正文", tags=["a"])
+    updated = note_store.update(note.id, body="新正文")
+    assert (updated.title, updated.body, updated.tags) == ("标题", "新正文", ["a"])
+    assert updated.created_at == note.created_at
+    assert updated.updated_at > note.updated_at
+    assert note_store.read(note.id).body == "新正文"
+
+
+def test_update_全_none_是_noop(note_store):
+    note = note_store.create("标题")
+    assert note_store.update(note.id).updated_at == note.updated_at
+
+
+def test_update_空标题抛_note_error(note_store):
+    note = note_store.create("标题")
+    with pytest.raises(NoteError):
+        note_store.update(note.id, title="  ")
+
+
+def test_update_不存在抛_note_not_found(note_store):
+    with pytest.raises(NoteNotFoundError):
+        note_store.update("note_missing", body="x")
+
+
+def test_delete_删除文件与索引条目(note_store, note_config):
+    note = note_store.create("标题")
+    assert note_store.delete(note.id) is True
+    assert not (note_config.notes_dir / note.file_path).exists()
+    assert note_store.exists(note.id) is False
+
+
+def test_delete_不存在返回_false(note_store):
+    assert note_store.delete("note_missing") is False
+
+
+def test_exists(note_store):
+    note = note_store.create("标题")
+    assert note_store.exists(note.id) is True
+    assert note_store.exists("note_missing") is False
+
+
+def test_sync_补录孤儿文件(note_store, note_config):
+    write_note(note_config, "handwritten", "2026-09-23T15:30:00+00:00", title="手写笔记")
+    assert note_store.exists("handwritten") is True
+    assert note_store.read("handwritten").title == "手写笔记"
+
+
+def test_sync_删除缺失条目的索引项(note_store, note_config):
+    note = note_store.create("标题")
+    (note_config.notes_dir / note.file_path).unlink()
+    assert note_store.exists(note.id) is False
+
+
+def test_自动修复不改写_md_文件字节(note_store, note_config):
+    note = note_store.create("标题", "正文")
+    write_note(note_config, "handwritten", "2026-09-23T15:30:00+00:00", title="手写")
+    before = {path.name: path.read_bytes() for path in note_config.notes_dir.glob("*.md")}
+    note_store.read(note.id)
+    note_store.exists("handwritten")
+    after = {path.name: path.read_bytes() for path in note_config.notes_dir.glob("*.md")}
+    assert before == after
+```
+
+- [ ] **Step 3: 跑测试确认失败**
+
+```bash
+uv run pytest tests/test_note_store.py -v
+```
+
+Expected: FAIL —— `ModuleNotFoundError: No module named 'hello_agents.notes.store'`。
+
+- [ ] **Step 4: 写实现**
+
+创建 `hello_agents/notes/store.py`：
+
+```python
+"""笔记存储 —— 文件与索引的协同
+
+.md 文件的原子读写、CRUD，以及索引漂移的检测与修复。
+文件是真相源，索引是派生缓存：任何自动修复只改索引，绝不改写 .md。
+"""
+
+import logging
+import os
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .base import (
+    Note,
+    NoteConfig,
+    NoteError,
+    NoteMeta,
+    NoteNotFoundError,
+    NoteType,
+    utcnow,
+)
+from .index import NoteIndex
+
+logger = logging.getLogger(__name__)
+
+
+class NoteStore:
+    """结构化笔记存储
+
+    每个公开操作都先 ``_sync()``（L1 集合级对齐），因此索引不常驻内存，
+    多进程与人工编辑即时可见。写 ``.md`` 只发生在 ``create`` / ``update``。
+
+    ``read`` 之外的检索类方法返回的 ``NoteMeta`` 直接取自刚读到的文件
+    （它本就是 ``Note``，可能带 ``body``）；``list`` 只走索引，不带正文。
+    """
+
+    def __init__(self, config: NoteConfig | None = None) -> None:
+        self._config = config or NoteConfig()
+        self._index = NoteIndex(self._config.index_path)
+
+    @property
+    def config(self) -> NoteConfig:
+        """当前配置"""
+        return self._config
+
+    def create(
+        self,
+        title: str,
+        body: str = "",
+        *,
+        type: str = NoteType.GENERAL,
+        tags: list[str] | None = None,
+        note_id: str | None = None,
+    ) -> Note:
+        """新建笔记并落盘
+
+        ``note_id`` 可显式指定（迁移 / 幂等写入）；已存在时抛 NoteError。
+        未指定时按 ``note_YYYYMMDD_HHMMSS_N`` 生成，同秒内序号递增。
+        """
+        if not title.strip():
+            raise NoteError("title 不能为空")
+        self._config.notes_dir.mkdir(parents=True, exist_ok=True)
+        self._sync()
+        now = utcnow()
+        new_id = note_id or self._next_id(now)
+        if self._index.get(new_id) is not None or (self._config.notes_dir / f"{new_id}.md").exists():
+            raise NoteError(f"笔记 id 已存在: {new_id}")
+        note = Note(
+            id=new_id,
+            title=title,
+            type=str(type),
+            tags=list(tags or []),
+            created_at=now,
+            updated_at=now,
+            file_path=f"{new_id}.md",
+            body=body,
+        )
+        self._write(note)
+        return note
+
+    def read(self, note_id: str) -> Note:
+        """读取单条笔记；不存在抛 NoteNotFoundError
+
+        顺带做 L2 单条级漂移检测：frontmatter 与索引条目不一致时以文件为准修正索引。
+        """
+        self._sync()
+        note = self._read_note(note_id)
+        if self._repair_one(note):
+            self._index.save()
+        return note
+
+    def update(
+        self,
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> Note:
+        """按字段更新；全部为 None 时是 no-op（不刷新 updated_at）"""
+        if title is not None and not title.strip():
+            raise NoteError("title 不能为空")
+        current = self.read(note_id)
+        if title is None and body is None and type is None and tags is None:
+            return current
+        updated = replace(
+            current,
+            title=current.title if title is None else title,
+            body=current.body if body is None else body,
+            type=current.type if type is None else str(type),
+            tags=current.tags if tags is None else list(tags),
+            updated_at=utcnow(),
+        )
+        self._write(updated)
+        return updated
+
+    def delete(self, note_id: str) -> bool:
+        """删除笔记文件与索引条目；不存在返回 False"""
+        self._sync()
+        entry = self._index.get(note_id)
+        path = self._config.notes_dir / (str(entry["file_path"]) if entry else f"{note_id}.md")
+        if entry is None and not path.is_file():
+            return False
+        path.unlink(missing_ok=True)
+        self._index.remove(note_id)
+        self._index.save()
+        return True
+
+    def exists(self, note_id: str) -> bool:
+        """笔记是否存在（先做 L1 对齐，再以索引为准）"""
+        self._sync()
+        return self._index.get(note_id) is not None
+
+    def _sync(self) -> None:
+        """L1 集合级：目录 ↔ 索引对齐（缺失条目删除、孤儿文件补录）"""
+        self._index.load()
+        on_disk = self._markdown_names()
+        indexed = {str(entry["file_path"]) for entry in self._index.all()}
+        changed = False
+        for entry in self._index.all():
+            if entry["file_path"] not in on_disk:
+                self._index.remove(str(entry["id"]))
+                changed = True
+        for file_name in sorted(on_disk - indexed):
+            self._index.upsert(self._read_file(file_name).to_dict())
+            changed = True
+        if changed:
+            self._index.save()
+            logger.warning("笔记索引与目录不一致，已按目录修正（现 %d 条）", len(self._index))
+
+    def _write(self, note: Note) -> None:
+        """原子写 .md 并同步索引"""
+        self._config.notes_dir.mkdir(parents=True, exist_ok=True)
+        path = self._config.notes_dir / note.file_path
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(note.to_markdown(), encoding="utf-8")
+        os.replace(tmp, path)
+        self._index.upsert(note.to_dict())
+        self._index.save()
+
+    def _read_note(self, note_id: str) -> Note:
+        """按 id 读文件；不存在抛 NoteNotFoundError"""
+        entry = self._index.get(note_id)
+        file_name = str(entry["file_path"]) if entry else f"{note_id}.md"
+        if not (self._config.notes_dir / file_name).is_file():
+            raise NoteNotFoundError(f"笔记不存在: {note_id}")
+        return self._read_file(file_name)
+
+    def _read_file(self, file_name: str) -> Note:
+        """读并解析一个笔记文件（BOM 由 utf-8-sig 处理）"""
+        path = self._config.notes_dir / file_name
+        return Note.from_markdown(
+            path.read_text(encoding="utf-8-sig"),
+            file_path=file_name,
+            fallback_time=datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
+        )
+
+    def _repair_one(self, note: Note) -> bool:
+        """L2 单条级：以文件 frontmatter 为准修正索引条目，返回是否改动（不落盘）"""
+        wanted = note.to_dict()
+        changed = self._index.get(note.id) != wanted
+        for entry in self._index.all():
+            if entry["id"] != note.id and entry["file_path"] == note.file_path:
+                self._index.remove(str(entry["id"]))
+                changed = True
+        if changed:
+            self._index.upsert(wanted)
+            logger.warning("笔记 %s 的索引条目与文件不一致，已按文件修正", note.file_path)
+        return changed
+
+    def _markdown_names(self) -> set[str]:
+        """目录下的 .md 文件名集合（目录不存在时为空集）"""
+        if not self._config.notes_dir.is_dir():
+            return set()
+        return {path.name for path in self._config.notes_dir.glob("*.md")}
+
+    def _next_id(self, now: datetime) -> str:
+        """生成 ``note_YYYYMMDD_HHMMSS_N``，同时避开目录与索引里的既有 id"""
+        prefix = f"note_{now:%Y%m%d_%H%M%S}_"
+        used = {path.stem for path in self._config.notes_dir.glob(f"{prefix}*.md")}
+        used |= {
+            str(entry["id"])
+            for entry in self._index.all()
+            if str(entry["id"]).startswith(prefix)
+        }
+        serial = 0
+        while f"{prefix}{serial}" in used:
+            serial += 1
+        return f"{prefix}{serial}"
+```
+
+- [ ] **Step 5: 跑测试确认通过**
+
+```bash
+uv run pytest tests/test_note_store.py -v
+```
+
+Expected: PASS（22 passed）。
+
+- [ ] **Step 6: 格式化并提交**
+
+```bash
+uv run ruff format hello_agents/notes tests/test_note_store.py tests/conftest.py
+uv run ruff check hello_agents/notes tests/test_note_store.py tests/conftest.py
+git add hello_agents/notes/store.py tests/test_note_store.py tests/conftest.py
+git commit -m "feat: add note store with atomic writes and index drift repair"
+```
+
+---
+
+## Task 5: `NoteStore` 的检索与完整性
+
+**Files:**
+- Modify: `hello_agents/notes/store.py`（追加 `list` / `search` / `summary` / `verify` / `rebuild_index` 与模块级 `_sections_of`）
+- Test: `tests/test_note_store.py`（追加后半）
+
+**Interfaces:**
+- Consumes: Task 4 的全部私有辅助（`_sync` / `_read_file` / `_repair_one` / `_markdown_names`）、`search.score`、`base` 的 `DriftReport` / `NoteSummary` / `SectionPreview`
+- Produces: `list(*, type=None, tags=None, since=None, until=None, limit=None) -> list[NoteMeta]`、`search(query, *, limit=10) -> list[tuple[NoteMeta, float]]`、`summary(*, type=None, tags=None, limit=None) -> list[NoteSummary]`、`verify() -> DriftReport`、`rebuild_index() -> int`
+- 契约：`list` **零文件读**；`search` / `summary` 为 O(n) 文件读并顺手做 L2 修正；`verify` **只报告不改动**（不写盘）
+
+- [ ] **Step 1: 写失败测试**
+
+在 `tests/test_note_store.py` 末尾追加：
+
+```python
+def test_list_只读索引不读文件(note_store, monkeypatch, clock):
+    note_store.create("标题一", "正文")
+    note_store.create("标题二", "正文")
+    read_calls = []
+    monkeypatch.setattr(
+        NoteStore, "_read_file", lambda self, file_name: read_calls.append(file_name)
+    )
+    assert [meta.title for meta in note_store.list()] == ["标题二", "标题一"]
+    assert read_calls == []
+
+
+def test_list_按_type_与_tags_过滤(note_store, clock):
+    note_store.create("阻塞", type=NoteType.BLOCKER, tags=["deps"])
+    note_store.create("决策", type=NoteType.DECISION, tags=["deps"])
+    assert [meta.title for meta in note_store.list(type=NoteType.BLOCKER)] == ["阻塞"]
+    assert [meta.title for meta in note_store.list(tags=["deps"])] == ["决策", "阻塞"]
+
+
+def test_list_limit(note_store, clock):
+    for index in range(3):
+        note_store.create(f"标题{index}")
+    assert len(note_store.list(limit=2)) == 2
+    assert note_store.list(limit=0) == []
+
+
+def test_list_按_updated_at_过滤(note_store, note_config, clock):
+    write_note(note_config, "old", "2026-09-23T10:00:00+00:00", title="旧的")
+    write_note(note_config, "new", "2026-09-24T10:00:00+00:00", title="新的")
+    since = datetime(2026, 9, 24, tzinfo=UTC)
+    assert [meta.title for meta in note_store.list(since=since)] == ["新的"]
+    assert [meta.title for meta in note_store.list(until=since)] == ["旧的"]
+
+
+def test_search_标题命中优先于正文命中(note_store, note_config):
+    write_note(note_config, "title-hit", "2026-09-23T15:30:00+00:00", title="依赖冲突", body="无关")
+    write_note(note_config, "body-hit", "2026-09-23T15:30:00+00:00", title="无关", body="依赖冲突")
+    hits = note_store.search("依赖冲突")
+    assert [meta.title for meta, _ in hits] == ["依赖冲突", "无关"]
+    assert hits[0][1] == 0.6
+    assert hits[1][1] == 0.4
+
+
+def test_search_无命中返回空(note_store, note_config):
+    write_note(note_config, "a", "2026-09-23T15:30:00+00:00", title="向量检索选型")
+    assert note_store.search("完全不相关的词") == []
+
+
+def test_search_limit(note_store, note_config):
+    write_note(note_config, "a", "2026-09-23T15:30:00+00:00", title="依赖冲突一")
+    write_note(note_config, "b", "2026-09-23T15:30:00+00:00", title="依赖冲突二")
+    assert len(note_store.search("依赖冲突", limit=1)) == 1
+
+
+def test_search_顺手修正_l2_漂移(note_store, note_config):
+    note = note_store.create("旧标题")
+    path = note_config.notes_dir / note.file_path
+    path.write_text(path.read_text(encoding="utf-8").replace("旧标题", "依赖冲突"), encoding="utf-8")
+    note_store.search("依赖冲突")
+    index = json.loads(note_config.index_path.read_text(encoding="utf-8"))
+    assert index[note.id]["title"] == "依赖冲突"
+
+
+def test_summary_提取小节标题与首行预览(note_store):
+    note_store.create(
+        "项目进展",
+        "## 完成情况\n\n已完成数据模型层重构。\n\n## 下一步计划\n\n重构业务逻辑层。",
+    )
+    sections = note_store.summary()[0].sections
+    assert [(item.heading, item.preview) for item in sections] == [
+        ("完成情况", "已完成数据模型层重构。"),
+        ("下一步计划", "重构业务逻辑层。"),
+    ]
+
+
+def test_summary_无小节时用首个非空行(note_store):
+    note_store.create("随手记", "没有小节的正文\n\n第二行")
+    sections = note_store.summary()[0].sections
+    assert [(item.heading, item.preview) for item in sections] == [("", "没有小节的正文")]
+
+
+def test_summary_空正文返回空_sections(note_store):
+    note_store.create("空笔记", "")
+    assert note_store.summary()[0].sections == []
+
+
+def test_summary_预览截断到_80_字符(note_store):
+    note_store.create("长笔记", "## 现象\n\n" + "字" * 200)
+    assert len(note_store.summary()[0].sections[0].preview) == 80
+
+
+def test_summary_按_type_过滤并支持_limit(note_store, clock):
+    note_store.create("阻塞", type=NoteType.BLOCKER)
+    note_store.create("决策", type=NoteType.DECISION)
+    assert [item.meta.title for item in note_store.summary(type=NoteType.BLOCKER)] == ["阻塞"]
+    assert len(note_store.summary(limit=1)) == 1
+
+
+def test_summary_含_sections_的_to_dict(note_store):
+    note_store.create("标题", "## 结论\n\n锁定 httpx<0.28。")
+    payload = note_store.summary()[0].to_dict()
+    assert payload["sections"] == [{"heading": "结论", "preview": "锁定 httpx<0.28。"}]
+    assert payload["title"] == "标题"
+
+
+def test_verify_报告三类漂移(note_store, note_config, clock):
+    keep = note_store.create("保留")
+    gone = note_store.create("删除")
+    (note_config.notes_dir / gone.file_path).unlink()
+    write_note(note_config, "orphan", "2026-09-23T15:30:00+00:00", title="孤儿")
+    path = note_config.notes_dir / keep.file_path
+    path.write_text(path.read_text(encoding="utf-8").replace("保留", "改过"), encoding="utf-8")
+    report = note_store.verify()
+    assert report.missing_files == [gone.id]
+    assert report.orphan_files == ["orphan.md"]
+    assert report.mismatched == [keep.id]
+    assert report.is_clean is False
+    assert report.summary() == "缺失 1 / 孤儿 1 / 不一致 1"
+
+
+def test_verify_清洁时为_is_clean(note_store):
+    note_store.create("标题")
+    assert note_store.verify().is_clean is True
+
+
+def test_verify_与_list_不改写任何文件(note_store, note_config):
+    note_store.create("标题", "正文")
+    write_note(note_config, "orphan", "2026-09-23T15:30:00+00:00", title="孤儿")
+    before = {path.name: path.read_bytes() for path in note_config.notes_dir.glob("*.md")}
+    note_store.verify()
+    note_store.list()
+    after = {path.name: path.read_bytes() for path in note_config.notes_dir.glob("*.md")}
+    assert before == after
+
+
+def test_rebuild_index_重建并返回条目数(note_store, note_config):
+    note_store.create("一")
+    note_store.create("二")
+    note_config.index_path.write_text("{ 坏掉的索引", encoding="utf-8")
+    assert note_store.rebuild_index() == 2
+    assert note_store.verify().is_clean is True
+
+
+def test_索引损坏后操作能自愈(note_store, note_config):
+    note = note_store.create("标题")
+    note_config.index_path.write_text("不是 json", encoding="utf-8")
+    assert note_store.exists(note.id) is True
+    assert [meta.title for meta in note_store.list()] == ["标题"]
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+```bash
+uv run pytest tests/test_note_store.py -v
+```
+
+Expected: FAIL —— `AttributeError: 'NoteStore' object has no attribute 'list'`。
+
+- [ ] **Step 3: 写实现**
+
+在 `hello_agents/notes/store.py` 的 `exists` 方法之后、`_sync` 之前插入五个公开方法：
+
+```python
+    def list(
+        self,
+        *,
+        type: str | None = None,
+        tags: list[str] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[NoteMeta]:
+        """按索引过滤列出笔记元数据——不读任何笔记文件
+
+        这是索引存在的意义：目录里有上千条笔记时，本方法也只读一次索引。
+        """
+        self._sync()
+        entries = self._index.filter(type=type, tags=tags, since=since, until=until)
+        return [NoteMeta.from_index_entry(entry) for entry in entries[:limit]]
+
+    def search(self, query: str, *, limit: int = 10) -> list[tuple[NoteMeta, float]]:
+        """关键词检索：对全部笔记正文打分（O(n) 文件读），顺手做 L2 修正
+
+        只返回分数大于 0 的命中；按分数降序，同分沿用索引的 ``updated_at`` 降序
+        （索引本身已按此排序，``sort`` 稳定）。
+        """
+        self._sync()
+        scored: list[tuple[NoteMeta, float]] = []
+        changed = False
+        for entry in self._index.all():
+            note = self._read_file(str(entry["file_path"]))
+            changed |= self._repair_one(note)
+            value = score(note.title, note.tags, note.body, query)
+            if value > 0:
+                scored.append((note, value))
+        if changed:
+            self._index.save()
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:limit]
+
+    def summary(
+        self,
+        *,
+        type: str | None = None,
+        tags: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[NoteSummary]:
+        """全库摘要：元数据 + 正文小节预览（O(n) 文件读）
+
+        与 ``list`` 的成本差异是刻意的：摘要要正文小节，必须读文件。
+        """
+        self._sync()
+        summaries: list[NoteSummary] = []
+        changed = False
+        for entry in self._index.filter(type=type, tags=tags)[:limit]:
+            note = self._read_file(str(entry["file_path"]))
+            changed |= self._repair_one(note)
+            summaries.append(NoteSummary(meta=note, sections=_sections_of(note.body)))
+        if changed:
+            self._index.save()
+        return summaries
+
+    def verify(self) -> DriftReport:
+        """L3 全量级：读所有 .md 逐字段比对，只报告不改动（不写盘）"""
+        self._index.load()
+        on_disk = self._markdown_names()
+        indexed = {str(entry["file_path"]): entry for entry in self._index.all()}
+        return DriftReport(
+            missing_files=[
+                str(entry["id"]) for file_name, entry in indexed.items() if file_name not in on_disk
+            ],
+            orphan_files=sorted(on_disk - set(indexed)),
+            mismatched=[
+                str(indexed[file_name]["id"])
+                for file_name in sorted(on_disk & set(indexed))
+                if self._read_file(file_name).to_dict() != indexed[file_name]
+            ],
+        )
+
+    def rebuild_index(self) -> int:
+        """L3：清空索引并按目录全量重建，返回条目数"""
+        self._config.notes_dir.mkdir(parents=True, exist_ok=True)
+        entries = [self._read_file(name).to_dict() for name in sorted(self._markdown_names())]
+        self._index.replace_all(entries)
+        self._index.save()
+        return len(self._index)
+```
+
+同时把文件顶部的导入补全（`re`、`SectionPreview`、`NoteSummary`、`DriftReport`、`score`），并在文件末尾追加模块级函数：
+
+```python
+_PREVIEW_CHARS = 80
+_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _sections_of(body: str) -> list[SectionPreview]:
+    """提取二级及以下标题作为小节，每节取紧随其后的首个非空行（截断 80 字符）
+
+    没有小节标题时取正文首个非空行作为唯一预览（``heading`` 为空串）；
+    正文为空时返回空列表。
+    """
+    matches = list(_HEADING_RE.finditer(body))
+    if not matches:
+        first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        return [SectionPreview(heading="", preview=first[:_PREVIEW_CHARS])] if first else []
+    sections: list[SectionPreview] = []
+    for position, match in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(body)
+        preview = next(
+            (line.strip() for line in body[match.end() : end].splitlines() if line.strip()),
+            "",
+        )
+        sections.append(SectionPreview(heading=match.group(2), preview=preview[:_PREVIEW_CHARS]))
+    return sections
+```
+
+导入块最终形态：
+
+```python
+import logging
+import os
+import re
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .base import (
+    DriftReport,
+    Note,
+    NoteConfig,
+    NoteError,
+    NoteMeta,
+    NoteNotFoundError,
+    NoteSummary,
+    NoteType,
+    SectionPreview,
+    utcnow,
+)
+from .index import NoteIndex
+from .search import score
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+```bash
+uv run pytest tests/test_note_store.py -v
+```
+
+Expected: PASS（41 passed）。
+
+- [ ] **Step 5: 格式化并提交**
+
+```bash
+uv run ruff format hello_agents/notes tests/test_note_store.py
+uv run ruff check hello_agents/notes tests/test_note_store.py
+git add hello_agents/notes/store.py tests/test_note_store.py
+git commit -m "feat: add note listing, search, summary and integrity verification"
+```
+
+---
+
+## Task 6: 公开导出与 `NoteTool`
+
+**Files:**
+- Modify: `hello_agents/notes/__init__.py`（定稿）
+- Modify: `hello_agents/tools/builtin/__init__.py`（`__all__` 补 `NoteTool`）
+- Create: `hello_agents/tools/builtin/note_tool.py`
+- Modify: `tests/conftest.py`（夹具改为从包根导入）
+- Test: `tests/test_note_tool.py`
+
+**Interfaces:**
+- Consumes: `hello_agents.notes` 的全部公开名字、`tools.base.BaseTool` / `ToolParameter`、`tools.response.ToolResponse`
+- Produces: `class NoteTool(BaseTool)`，`run(input_data=None, **kwargs) -> ToolResponse`，`get_parameters() -> list[ToolParameter]`，构造签名 `NoteTool(store: NoteStore | None = None)`，模块级 `_ACTIONS: set[str]`
+- 契约：七个动作 `create` / `read` / `update` / `delete` / `list` / `search` / `summary`；错误码 `INVALID_PARAM` / `NOT_FOUND` / `NOTE_ERROR`；纯文本入参默认 `action="search"`；`tags` 传字符串时按逗号/空格切分
+
+- [ ] **Step 1: 定稿 `notes/__init__.py`**
+
+```python
+"""结构化笔记子系统
+
+每条笔记是一个 Markdown 文件：YAML frontmatter 记元数据，正文记状态、结论、
+阻塞与行动项；`notes_index.json` 是派生索引，用于快速检索、元数据集中管理与
+完整性校验。**文件是真相源**：手改过的 `.md` 会被读回，索引按文件自动修正，
+也可以随时 `rebuild_index()` 全量重建。
+
+典型用法：
+    from hello_agents.notes import NoteStore, NoteType
+
+    store = NoteStore()                                    # 落盘到 ./notes/
+    note = store.create("依赖冲突排查", "## 现象\\n...", type=NoteType.BLOCKER)
+    store.update(note.id, body=note.body + "\\n## 结论\\n锁定 httpx<0.28")
+    hits = store.search("依赖冲突")                         # [(NoteMeta, 0.83), ...]
+    store.summary()                                        # 全库摘要（含小节预览）
+"""
+
+from .base import (
+    DriftReport,
+    Note,
+    NoteConfig,
+    NoteError,
+    NoteMeta,
+    NoteNotFoundError,
+    NoteSummary,
+    NoteType,
+    SectionPreview,
+    parse_datetime,
+    utcnow,
+)
+from .index import NoteIndex
+from .search import coverage, score, tokenize
+from .store import NoteStore
+
+__all__ = [
+    "DriftReport",
+    "Note",
+    "NoteConfig",
+    "NoteError",
+    "NoteIndex",
+    "NoteMeta",
+    "NoteNotFoundError",
+    "NoteStore",
+    "NoteSummary",
+    "NoteType",
+    "SectionPreview",
+    "coverage",
+    "parse_datetime",
+    "score",
+    "tokenize",
+    "utcnow",
+]
+```
+
+- [ ] **Step 2: 两处导出**
+
+`hello_agents/tools/builtin/__init__.py`：加 `from .note_tool import NoteTool`，并在 `__all__` 中按字母序插入 `"NoteTool"`（`MemoryTool` 之后、`RAGTool` 之前）。
+
+**不要动 `hello_agents/tools/__init__.py`**：`MemoryTool` / `RAGTool` 都不在它的 `__all__` 里，`NoteTool` 保持一致。
+
+- [ ] **Step 3: conftest 夹具改从包根导入**
+
+把 Task 4 追加的两行导入改为：
+
+```python
+from hello_agents.notes import NoteConfig, NoteStore
+```
+
+- [ ] **Step 4: 写失败测试**
+
+创建 `tests/test_note_tool.py`：
+
+```python
+"""NoteTool 测试：七个动作的契约与错误码"""
+
+import json
+
+import pytest
+
+from hello_agents.tools.builtin.note_tool import _ACTIONS, NoteTool
+from hello_agents.tools.response import ToolStatus
+
+
+@pytest.fixture
+def tool(note_store) -> NoteTool:
+    return NoteTool(note_store)
+
+
+def test_动作集完整():
+    assert _ACTIONS == {"create", "read", "update", "delete", "list", "search", "summary"}
+
+
+def test_get_parameters_覆盖全部动作参数(tool):
+    names = {param.name for param in tool.get_parameters()}
+    assert {"action", "id", "title", "body", "type", "tags", "query", "limit"} <= names
+
+
+def test_create_成功(tool):
+    response = tool.run(
+        {"action": "create", "title": "项目进展", "body": "正文", "tags": ["phase1"]}
+    )
+    assert response.status is ToolStatus.SUCCESS
+    assert response.data["title"] == "项目进展"
+    assert response.data["id"].startswith("note_")
+    assert "已创建笔记" in response.text
+
+
+def test_create_缺_title_报_invalid_param(tool):
+    assert tool.run({"action": "create", "body": "正文"}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_read_成功含正文(tool):
+    note_id = tool.run(
+        {"action": "create", "title": "标题", "body": "## 结论\n\n锁定 httpx<0.28。"}
+    ).data["id"]
+    response = tool.run({"action": "read", "id": note_id})
+    assert response.status is ToolStatus.SUCCESS
+    assert response.data["body"] == "## 结论\n\n锁定 httpx<0.28。"
+    assert "锁定 httpx<0.28。" in response.text
+
+
+def test_read_不存在报_not_found(tool):
+    assert tool.run({"action": "read", "id": "note_missing"}).error_info["code"] == "NOT_FOUND"
+
+
+def test_read_缺_id_报_invalid_param(tool):
+    assert tool.run({"action": "read"}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_update_成功(tool):
+    note_id = tool.run({"action": "create", "title": "标题", "body": "旧"}).data["id"]
+    assert tool.run({"action": "update", "id": note_id, "body": "新"}).status is ToolStatus.SUCCESS
+    assert tool.run({"action": "read", "id": note_id}).data["body"] == "新"
+
+
+def test_update_无字段报_invalid_param(tool):
+    note_id = tool.run({"action": "create", "title": "标题"}).data["id"]
+    assert tool.run({"action": "update", "id": note_id}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_update_不存在报_not_found(tool):
+    response = tool.run({"action": "update", "id": "note_missing", "body": "x"})
+    assert response.error_info["code"] == "NOT_FOUND"
+
+
+def test_delete_成功与不存在(tool):
+    note_id = tool.run({"action": "create", "title": "标题"}).data["id"]
+    assert tool.run({"action": "delete", "id": note_id}).data["deleted"] is True
+    response = tool.run({"action": "delete", "id": note_id})
+    assert response.status is ToolStatus.SUCCESS
+    assert response.data["deleted"] is False
+
+
+def test_list_过滤(tool):
+    tool.run({"action": "create", "title": "阻塞", "type": "blocker"})
+    tool.run({"action": "create", "title": "决策", "type": "decision"})
+    response = tool.run({"action": "list", "type": "blocker"})
+    assert [note["title"] for note in response.data["notes"]] == ["阻塞"]
+    assert "阻塞" in response.text
+
+
+def test_list_空库返回提示(tool):
+    response = tool.run({"action": "list"})
+    assert response.data["notes"] == []
+    assert response.text == "暂无笔记。"
+
+
+def test_search_返回_score(tool):
+    tool.run({"action": "create", "title": "依赖冲突排查", "body": "依赖冲突"})
+    hits = tool.run({"action": "search", "query": "依赖冲突"}).data["hits"]
+    assert hits[0]["title"] == "依赖冲突排查"
+    assert hits[0]["score"] == 1.0
+
+
+def test_search_缺_query_报_invalid_param(tool):
+    assert tool.run({"action": "search"}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_summary_返回_sections(tool):
+    tool.run({"action": "create", "title": "项目进展", "body": "## 完成情况\n\n已完成重构。"})
+    notes = tool.run({"action": "summary"}).data["notes"]
+    assert notes[0]["sections"] == [{"heading": "完成情况", "preview": "已完成重构。"}]
+
+
+def test_未知_action_报_invalid_param(tool):
+    assert tool.run({"action": "rewrite"}).error_info["code"] == "INVALID_PARAM"
+
+
+def test_纯文本入参默认_search(tool):
+    tool.run({"action": "create", "title": "依赖冲突排查"})
+    assert tool.run("依赖冲突").data["hits"][0]["title"] == "依赖冲突排查"
+
+
+def test_json_字符串入参(tool):
+    assert tool.run(json.dumps({"action": "create", "title": "标题"})).status is ToolStatus.SUCCESS
+
+
+def test_tags_传字符串时按逗号与空格切分(tool):
+    note_id = tool.run({"action": "create", "title": "标题", "tags": "deps, phase1"}).data["id"]
+    assert tool.run({"action": "read", "id": note_id}).data["tags"] == ["deps", "phase1"]
+
+
+def test_磁盘故障报_note_error(tool, monkeypatch):
+    def boom(note_id):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(tool.store, "read", boom)
+    assert tool.run({"action": "read", "id": "note_x"}).error_info["code"] == "NOTE_ERROR"
+```
+
+- [ ] **Step 5: 跑测试确认失败**
+
+```bash
+uv run pytest tests/test_note_tool.py -v
+```
+
+Expected: FAIL —— `ModuleNotFoundError: No module named 'hello_agents.tools.builtin.note_tool'`。
+
+- [ ] **Step 6: 写实现**
+
+创建 `hello_agents/tools/builtin/note_tool.py`：
+
+```python
+"""笔记工具
+
+让 Agent 在长时程任务中读写结构化笔记：create / read / update / delete /
+list / search / summary 七个动作，底层是 NoteStore。
+"""
+
+import json
+import re
+from typing import Any
+
+from ...notes import NoteError, NoteNotFoundError, NoteStore, NoteType
+from ..base import BaseTool, ToolParameter
+from ..response import ToolResponse
+
+_ACTIONS = {"create", "read", "update", "delete", "list", "search", "summary"}
+_UPDATE_FIELDS = ("title", "body", "type", "tags")
+
+
+def _invalid(message: str) -> ToolResponse:
+    """参数错误响应"""
+    return ToolResponse.error(code="INVALID_PARAM", message=message)
+
+
+def _as_tags(value: Any) -> list[str] | None:
+    """把入参 tags 规整为列表：字符串按逗号/空白切分（LLM 常这么传）"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [item for item in re.split(r"[,，\s]+", value) if item]
+    return [str(item) for item in value]
+
+
+class NoteTool(BaseTool):
+    """结构化笔记工具（长时程任务的外部记忆）"""
+
+    def __init__(self, store: NoteStore | None = None):
+        super().__init__(
+            name="note",
+            description=(
+                "笔记工具：读写结构化笔记。action=create 新建；read 读取；"
+                "update 更新；delete 删除；list 列出；search 检索；summary 取全库摘要。"
+            ),
+        )
+        self.store = store or NoteStore()
+
+    def run(self, input_data: Any = None, **kwargs) -> ToolResponse:
+        """执行笔记操作
+
+        input_data 支持三种形式：dict、JSON 字符串、纯文本
+        （纯文本默认按 action=search 检索）。
+        """
+        params = self._parse_input(input_data, kwargs)
+        action = params.get("action", "search")
+        if action not in _ACTIONS:
+            return _invalid(f"未知 action: {action}，可选 {sorted(_ACTIONS)}")
+        try:
+            return getattr(self, f"_do_{action}")(params)
+        except NoteNotFoundError as error:
+            return ToolResponse.error(code="NOT_FOUND", message=str(error))
+        except Exception as error:  # 文件系统故障不应击穿 Agent 循环
+            return ToolResponse.error(code="NOTE_ERROR", message=str(error))
+
+    def get_parameters(self) -> list[ToolParameter]:
+        """获取工具参数定义"""
+        return [
+            ToolParameter(
+                name="action",
+                type="str",
+                description="操作类型: create / read / update / delete / list / search / summary",
+            ),
+            ToolParameter(
+                name="id",
+                type="str",
+                description="笔记 id（read / update / delete 必填）",
+                required=False,
+            ),
+            ToolParameter(
+                name="title",
+                type="str",
+                description="标题（create 必填）",
+                required=False,
+            ),
+            ToolParameter(
+                name="body",
+                type="str",
+                description="Markdown 正文",
+                required=False,
+            ),
+            ToolParameter(
+                name="type",
+                type="str",
+                description="笔记类型: task_state / decision / blocker / finding / general",
+                required=False,
+            ),
+            ToolParameter(
+                name="tags",
+                type="list",
+                description="标签列表，也接受逗号分隔的字符串",
+                required=False,
+            ),
+            ToolParameter(
+                name="query",
+                type="str",
+                description="检索关键词（search 必填）",
+                required=False,
+            ),
+            ToolParameter(
+                name="limit",
+                type="int",
+                description="返回条数上限",
+                required=False,
+                default=10,
+            ),
+        ]
+
+    def _do_create(self, params: dict[str, Any]) -> ToolResponse:
+        title = params.get("title")
+        if not title:
+            return _invalid("action=create 需要提供 title")
+        note = self.store.create(
+            title=str(title),
+            body=str(params.get("body") or ""),
+            type=str(params.get("type") or NoteType.GENERAL),
+            tags=_as_tags(params.get("tags")),
+        )
+        return ToolResponse.success(
+            text=f"已创建笔记 {note.id}：《{note.title}》", data=note.to_dict()
+        )
+
+    def _do_read(self, params: dict[str, Any]) -> ToolResponse:
+        note_id = params.get("id")
+        if not note_id:
+            return _invalid("action=read 需要提供 id")
+        note = self.store.read(str(note_id))
+        header = f"[{note.type}] {note.title} ({note.id}) 更新于 {note.updated_at.isoformat()}"
+        return ToolResponse.success(
+            text=f"{header}\n\n{note.body}", data=note.to_dict() | {"body": note.body}
+        )
+
+    def _do_update(self, params: dict[str, Any]) -> ToolResponse:
+        note_id = params.get("id")
+        if not note_id:
+            return _invalid("action=update 需要提供 id")
+        fields: dict[str, Any] = {}
+        for name in _UPDATE_FIELDS:
+            value = params.get(name)
+            if value is None:
+                continue
+            fields[name] = _as_tags(value) if name == "tags" else value
+        if not fields:
+            return _invalid(f"action=update 至少需要提供 {list(_UPDATE_FIELDS)} 之一")
+        note = self.store.update(str(note_id), **fields)
+        return ToolResponse.success(text=f"已更新笔记 {note.id}", data=note.to_dict())
+
+    def _do_delete(self, params: dict[str, Any]) -> ToolResponse:
+        note_id = params.get("id")
+        if not note_id:
+            return _invalid("action=delete 需要提供 id")
+        deleted = self.store.delete(str(note_id))
+        text = f"已删除笔记 {note_id}" if deleted else f"笔记 {note_id} 不存在"
+        return ToolResponse.success(text=text, data={"id": str(note_id), "deleted": deleted})
+
+    def _do_list(self, params: dict[str, Any]) -> ToolResponse:
+        notes = self.store.list(
+            type=params.get("type"), tags=_as_tags(params.get("tags")), limit=params.get("limit")
+        )
+        if not notes:
+            return ToolResponse.success(text="暂无笔记。", data={"notes": []})
+        lines = [
+            f"[{meta.type}] {meta.title} ({meta.id}, {meta.updated_at.isoformat()})"
+            for meta in notes
+        ]
+        return ToolResponse.success(
+            text="\n".join(lines), data={"notes": [meta.to_dict() for meta in notes]}
+        )
+
+    def _do_search(self, params: dict[str, Any]) -> ToolResponse:
+        query = params.get("query") or params.get("content")
+        if not query:
+            return _invalid("action=search 需要提供 query")
+        hits = self.store.search(str(query), limit=int(params.get("limit") or 10))
+        if not hits:
+            return ToolResponse.success(
+                text=f"未检索到与「{query}」相关的笔记。", data={"hits": []}
+            )
+        lines = [
+            f"[{meta.type}] {meta.title} ({meta.id}, {value:.2f})" for meta, value in hits
+        ]
+        return ToolResponse.success(
+            text="\n".join(lines),
+            data={"hits": [meta.to_dict() | {"score": value} for meta, value in hits]},
+        )
+
+    def _do_summary(self, params: dict[str, Any]) -> ToolResponse:
+        summaries = self.store.summary(
+            type=params.get("type"), tags=_as_tags(params.get("tags")), limit=params.get("limit")
+        )
+        if not summaries:
+            return ToolResponse.success(text="暂无笔记。", data={"notes": []})
+        lines: list[str] = []
+        for item in summaries:
+            lines.append(f"[{item.meta.type}] {item.meta.title} ({item.meta.id})")
+            for section in item.sections:
+                prefix = f"{section.heading}: " if section.heading else ""
+                lines.append(f"  - {prefix}{section.preview}")
+        return ToolResponse.success(
+            text="\n".join(lines), data={"notes": [item.to_dict() for item in summaries]}
+        )
+
+    @staticmethod
+    def _parse_input(input_data: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """把 input_data 规整为参数字典（dict / JSON 字符串 / 纯文本）"""
+        params: dict[str, Any] = dict(kwargs)
+        if input_data is None:
+            return params
+        if isinstance(input_data, dict):
+            params.update(input_data)
+            return params
+        text = str(input_data).strip()
+        if text.startswith("{"):
+            try:
+                loaded = json.loads(text)
+            except json.JSONDecodeError:
+                loaded = None
+            if isinstance(loaded, dict):
+                params.update(loaded)
+                return params
+        params.setdefault("action", "search")
+        params.setdefault("query", text)
+        return params
+```
+
+- [ ] **Step 7: 跑测试确认通过**
+
+```bash
+uv run pytest tests/test_note_tool.py -v
+```
+
+Expected: PASS（21 passed）。
+
+- [ ] **Step 8: 格式化并提交**
+
+```bash
+uv run ruff format hello_agents/notes hello_agents/tools tests/test_note_tool.py tests/conftest.py
+uv run ruff check hello_agents/notes hello_agents/tools tests/test_note_tool.py tests/conftest.py
+git add hello_agents/notes/__init__.py hello_agents/tools tests/test_note_tool.py tests/conftest.py
+git commit -m "feat: add note tool with seven agent-facing actions"
+```
+
+---
+
+## Task 7: 示例脚本与收尾
+
+**Files:**
+- Create: `examples/note_tool_demo.py`
+- Modify: `.gitignore`（追加 `notes/`）
+
+**Interfaces:**
+- Consumes: `hello_agents.notes` 的全部公开名字、`hello_agents.tools.builtin.NoteTool`
+- Produces: 可离线跑通的演示脚本，覆盖创建 / 更新 / 过滤 / 检索 / 摘要 / 索引自愈
+
+- [ ] **Step 1: 写示例**
+
+创建 `examples/note_tool_demo.py`：
+
+```python
+"""NoteTool 离线示例
+
+演示结构化笔记的创建、更新、过滤、检索、摘要与索引自愈，
+全程不触网、不需要任何 API key。产物落在 ./notes/（已在 .gitignore 中忽略；
+要版本化自己的笔记时，删掉 .gitignore 里的 `notes/` 那一行即可）。
+"""
+
+from pathlib import Path
+
+from hello_agents.notes import NoteConfig, NoteStore, NoteType
+from hello_agents.tools.builtin import NoteTool
+
+NOTES = [
+    (
+        "项目进展 - 第一阶段",
+        "# 项目进展 - 第一阶段\n\n## 完成情况\n\n已完成数据模型层的重构。\n\n"
+        "## 下一步计划\n\n重构业务逻辑层。",
+        NoteType.TASK_STATE,
+        ["refactoring", "phase1"],
+    ),
+    (
+        "依赖冲突排查",
+        "# 依赖冲突排查\n\n## 现象\n\nhttpx 版本冲突导致启动失败。\n\n"
+        "## 阻塞\n\n等待上游修复。",
+        NoteType.BLOCKER,
+        ["deps", "phase1"],
+    ),
+    (
+        "向量检索选型",
+        "# 向量检索选型\n\n## 结论\n\n本地 TF-IDF 兜底，配置后升级 Qdrant。",
+        NoteType.DECISION,
+        ["rag"],
+    ),
+]
+
+
+def main() -> None:
+    config = NoteConfig(notes_dir=Path("./notes"))
+    store = NoteStore(config)
+    tool = NoteTool(store)
+
+    print("== 创建 ==")
+    for title, body, note_type, tags in NOTES:
+        response = tool.run(
+            {"action": "create", "title": title, "body": body, "type": note_type, "tags": tags}
+        )
+        print(f"  {response.text}")
+
+    print("\n== 更新 ==")
+    blocker = store.list(type=NoteType.BLOCKER)[0]
+    response = tool.run(
+        {"action": "update", "id": blocker.id, "body": blocker.body + "\n\n## 结论\n\n锁定 httpx<0.28。"}
+    )
+    print(f"  {response.text}")
+
+    print("\n== 列出（type=task_state）==")
+    print(tool.run({"action": "list", "type": NoteType.TASK_STATE}).text)
+
+    print("\n== 检索「依赖冲突」==")
+    print(tool.run({"action": "search", "query": "依赖冲突"}).text)
+
+    print("\n== 全库摘要 ==")
+    print(tool.run({"action": "summary"}).text)
+
+    print("\n== 索引自愈 ==")
+    scratch = store.create("临时草稿", "## 草稿\n\n用完即弃。")
+    (config.notes_dir / scratch.file_path).unlink()
+    print(f"  删除文件: {scratch.file_path}")
+    print(f"  verify: {store.verify().summary()}")
+    print(f"  rebuild 条目数: {store.rebuild_index()}")
+    print(f"  verify: {store.verify().summary()}")
+
+    print(f"\n产物目录: {config.notes_dir.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: 跑示例**
+
+```bash
+uv run python examples/note_tool_demo.py
+```
+
+Expected: 依次打印创建 / 更新 / 列出 / 检索 / 摘要 / 自愈六段；最后两行 `verify` 分别为 `缺失 1 / 孤儿 0 / 不一致 0` 与 `缺失 0 / 孤儿 0 / 不一致 0`，`rebuild 条目数: 3`。
+
+- [ ] **Step 3: 核对产物**
+
+```bash
+ls notes/ && head -8 notes/note_*.md | head -20
+```
+
+Expected: 3 个 `.md` 与 1 个 `notes_index.json`；每个 `.md` 的 frontmatter 含 `id` / `title` / `type` / `tags` / `created_at` / `updated_at`，时间戳带 `+00:00`，`tags` 是行内列表。
+
+- [ ] **Step 4: 忽略示例产物**
+
+在 `.gitignore` 的「Serena local config」段之前追加：
+
+```
+# NoteTool 示例产物
+notes/
+```
+
+- [ ] **Step 5: 全量检查**
+
+```bash
+uv run ruff format hello_agents tests examples
+uv run ruff check hello_agents tests examples
+uv run pytest tests/ -q
+git status --short
+```
+
+Expected:
+- `ruff check` 中**本次触碰的文件零告警**（`search.py` / `core/llm.py` / `chain.py` / `memory_tool.py` / `calculator.py` / `neo4j_store.py` / `simple_agent.py` / `react_agent.py` 的既有告警不修）。
+- `pytest` 全绿，`tests/test_note_*.py` 共 4 个文件、约 99 个用例全过，既有测试不回归。
+- `git status` 中不出现 `notes/`。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add examples/note_tool_demo.py .gitignore
+git commit -m "docs: add offline NoteTool demo and ignore its output"
+```
+
+---
+
+## 自检记录
+
+**1. Spec 覆盖**：spec §2（数据模型与格式）→ Task 1；§3.2 `NoteIndex` → Task 2；§3.2 `search` → Task 3；§4.4 的 `create` / `read` / `update` / `delete` / `exists` 与 §5.2 的 L1 / L2 → Task 4；§4.4 的 `list` / `search` / `summary` / `verify` / `rebuild_index` 与 §5.2 的 L3 → Task 5；§4.5 `NoteTool` 七动作 → Task 6；§7 交付物中的示例脚本与 `.gitignore` → Task 7。§1.3 的非目标（不动 `context/` / `memory/` / `agents/` / `hello_agents/__init__.py`）在 Global Constraints 中约束，Task 6 Step 2 明确不改 `tools/__init__.py`。
+
+**2. 规划期对 spec 的三处修订**（已在 spec 中同步，实施时以 spec 为准）：
+- `Note.from_markdown` 的 `fallback_id` 改为 `file_path`：手改过 frontmatter 的文件，其 `id` 可能与文件名不一致，`file_path` 必须取真实文件名。
+- 新增 `base.parse_datetime` 公开辅助函数：`base` / `index` / `store` 三处都要把 ISO 字符串解析为带时区 `datetime`，不该各写一份。
+- 测试文件清单补 `tests/test_note_base.py`：YAML 标量引号规则是手写序列化最容易写错的地方，需要直接测试。
+
+**3. 类型一致性**：`NoteMeta.to_dict()` 的 7 个字段与索引条目、`NoteIndex.upsert` 的入参、`NoteStore._repair_one` 的比对对象三者同构；`NoteSummary.to_dict()` 输出 `sections: [{heading, preview}]`，与 Task 6 的 `_do_summary` 断言一致；`search.score` 的返回被 `NoteStore.search` 与 `NoteTool._do_search` 一路保留到 `data["hits"][i]["score"]`，中间无改名。
+
+**4. Review Focus 落点**：CRLF + BOM → Task 1 `test_from_markdown_容忍_crlf_与_bom`；标题特殊字符 → Task 1 `test_to_markdown_标题含_yaml_特殊字符仍可解析`；正文水平线 → Task 1 `test_from_markdown_正文含水平线不被当作围栏`；目录缺失 / 空文件 / 只有 frontmatter → Task 4 `test_create_自动建目录`、`test_read_空文件与只有_frontmatter_的文件不崩`、Task 5 `test_summary_空正文返回空_sections`；工具 `tags` 传字符串 → Task 6 `test_tags_传字符串时按逗号与空格切分`。

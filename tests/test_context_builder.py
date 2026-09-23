@@ -465,3 +465,261 @@ def test_init_raises_config_error_when_tiktoken_unavailable(monkeypatch):
     monkeypatch.setattr(tiktoken, "get_encoding", _boom)
     with pytest.raises(ConfigError):
         ContextBuilder()
+
+
+# --- Task 8: Gather ---
+
+from hello_agents.core import Message, MessageRole
+from hello_agents.tools.response import ToolResponse, ToolStatus
+
+
+class _FakeTool:
+    """工具替身：记录 payload 并返回预设响应"""
+
+    def __init__(self, data=None, status=ToolStatus.SUCCESS, raises=None) -> None:
+        self.data = data or {}
+        self.status = status
+        self.raises = raises
+        self.calls: list[dict] = []
+
+    def run(self, input_data, **kwargs):
+        self.calls.append(input_data)
+        if self.raises is not None:
+            raise self.raises
+        return ToolResponse(status=self.status, text="", data=self.data)
+
+
+def _memory_hits(*contents, score=0.8, importance=None):
+    hits = []
+    for index, content in enumerate(contents):
+        metadata = {} if importance is None else {"importance": importance}
+        hits.append(
+            {
+                "id": f"m{index}",
+                "content": content,
+                "memory_type": "semantic",
+                "metadata": metadata,
+                "created_at": datetime.now(tz=UTC).isoformat(),
+                "expires_at": None,
+                "score": score,
+            }
+        )
+    return hits
+
+
+def test_gather_builds_system_instruction_packet():
+    builder = ContextBuilder()
+    packets = builder._gather("查询", [], "你是助手", [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].metadata["type"] == "system_instruction"
+    assert packets[0].relevance_score == 1.0
+    assert packets[0].token_count == builder._count_tokens("你是助手")
+
+
+def test_gather_reuses_cached_system_instruction_packet():
+    builder = ContextBuilder()
+    first = builder._gather("查询", [], "你是助手", [], builder.config)
+    second = builder._gather("另一查询", [], "你是助手", [], builder.config)
+    assert first[0] is second[0]
+
+
+def test_gather_skips_empty_system_instructions():
+    """G-k：空串是 falsy，不得产出系统指令包"""
+    builder = ContextBuilder()
+    assert builder._gather("查询", [], "", [], builder.config) == []
+
+
+def test_gather_calls_memory_tool_with_real_contract():
+    """修复 B13：action 必须是 recall，且不得传记忆层不识别的参数"""
+    tool = _FakeTool(data={"hits": _memory_hits("用户喜欢爬山")})
+    builder = ContextBuilder(memory_tool=tool)
+    packets = builder._gather("爬山", [], None, [], builder.config)
+    payload = tool.calls[0]
+    assert payload["action"] == "recall"
+    assert payload["query"] == "爬山"
+    assert payload["limit"] == builder.config.memory_limit
+    assert "min_importance" not in payload
+    assert "min_score" not in payload
+    assert packets[0].metadata["type"] == "memory"
+    assert packets[0].relevance_score == 0.8
+
+
+def test_gather_calls_rag_tool_with_real_contract():
+    """修复 B13：action 必须是 query，条数参数是 top_k"""
+    tool = _FakeTool(data={"chunks": _memory_hits("向量库配置说明", score=0.9)})
+    builder = ContextBuilder(rag_tool=tool)
+    packets = builder._gather("向量库", [], None, [], builder.config)
+    payload = tool.calls[0]
+    assert payload["action"] == "query"
+    assert payload["question"] == "向量库"
+    assert payload["top_k"] == builder.config.rag_limit
+    assert packets[0].metadata["type"] == "rag"
+    # G-h：与 memory 侧 relevance_score == 0.8 对称，钉住分数透传
+    assert packets[0].relevance_score == 0.9
+
+
+def test_gather_skips_missing_tools():
+    """修复 B2：未注入工具时必须静默跳过而非 AttributeError"""
+    builder = ContextBuilder()
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert packets == []
+
+
+def test_gather_skips_tool_error_response():
+    # G-a：data 必须带非空 hits，否则删掉 ERROR 检查后 hits 仍为空、断言照样过
+    tool = _FakeTool(data={"hits": _memory_hits("x")}, status=ToolStatus.ERROR)
+    builder = ContextBuilder(memory_tool=tool)
+    assert builder._gather("查询", [], None, [], builder.config) == []
+
+
+def test_gather_skips_tool_exception():
+    tool = _FakeTool(raises=RuntimeError("boom"))
+    builder = ContextBuilder(memory_tool=tool)
+    assert builder._gather("查询", [], None, [], builder.config) == []
+
+
+def test_gather_skips_rag_tool_error_response():
+    # G-b：RAG 侧 ERROR 分支原本零覆盖，且 chunks 必须非空才钉得住
+    tool = _FakeTool(
+        data={"chunks": _memory_hits("向量库配置说明", score=0.9)},
+        status=ToolStatus.ERROR,
+    )
+    builder = ContextBuilder(rag_tool=tool)
+    assert builder._gather("向量库", [], None, [], builder.config) == []
+
+
+def test_gather_skips_rag_tool_exception():
+    # G-b：RAG 侧吞异常分支原本零覆盖
+    tool = _FakeTool(raises=RuntimeError("boom"))
+    builder = ContextBuilder(rag_tool=tool)
+    assert builder._gather("向量库", [], None, [], builder.config) == []
+
+
+def test_gather_filters_by_min_source_score():
+    tool = _FakeTool(data={"hits": _memory_hits("低分命中", score=0.05)})
+    builder = ContextBuilder(
+        memory_tool=tool, config=ContextConfig(min_source_score=0.5)
+    )
+    assert builder._gather("查询", [], None, [], builder.config) == []
+
+
+def test_gather_keeps_hit_at_exact_min_source_score():
+    """G-d②：score == min_source_score 是保留（严格小于才丢），钉 < 而非 <="""
+    tool = _FakeTool(data={"hits": _memory_hits("边界命中", score=0.5)})
+    builder = ContextBuilder(
+        memory_tool=tool, config=ContextConfig(min_source_score=0.5)
+    )
+    assert len(builder._gather("查询", [], None, [], builder.config)) == 1
+
+
+def test_gather_filters_by_min_importance():
+    tool = _FakeTool(data={"hits": _memory_hits("低重要度", importance=0.1)})
+    builder = ContextBuilder(memory_tool=tool, config=ContextConfig(min_importance=0.5))
+    assert builder._gather("查询", [], None, [], builder.config) == []
+
+
+def test_gather_keeps_hit_at_exact_min_importance():
+    """G-d③：importance == min_importance 是保留，钉 < 而非 <="""
+    tool = _FakeTool(data={"hits": _memory_hits("边界重要度", importance=0.5)})
+    builder = ContextBuilder(memory_tool=tool, config=ContextConfig(min_importance=0.5))
+    assert len(builder._gather("查询", [], None, [], builder.config)) == 1
+
+
+def test_gather_keeps_hits_without_importance_metadata():
+    tool = _FakeTool(data={"hits": _memory_hits("无重要度字段")})
+    builder = ContextBuilder(memory_tool=tool, config=ContextConfig(min_importance=0.5))
+    assert len(builder._gather("查询", [], None, [], builder.config)) == 1
+
+
+def test_gather_leaves_scoreless_hits_unscored():
+    """G-c：MemoryItem.to_dict() 不含 score，Task 12 前 RAG 在线路径全是缺分命中
+
+    缺 score 时 source_score 记 0.0，relevance_score 留 None 给 Task 9 计算。
+    这是当下主路而非边角，不得被防御式编程省略。
+    """
+    hits = _memory_hits("缺分命中")
+    del hits[0]["score"]
+    tool = _FakeTool(data={"chunks": hits})
+    builder = ContextBuilder(rag_tool=tool)
+    packets = builder._gather("向量库", [], None, [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].relevance_score is None
+    assert packets[0].metadata["source_score"] == 0.0
+
+
+def test_gather_drops_scoreless_hits_when_min_source_score_positive():
+    """G-d①：缺 score 按 0.0 过滤，min_source_score>0 时整体丢光（spec 语义）"""
+    hits = _memory_hits("缺分命中")
+    del hits[0]["score"]
+    tool = _FakeTool(data={"chunks": hits})
+    builder = ContextBuilder(rag_tool=tool, config=ContextConfig(min_source_score=0.1))
+    assert builder._gather("向量库", [], None, [], builder.config) == []
+
+
+def test_gather_trims_history_to_window():
+    history = [Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(10)]
+    builder = ContextBuilder(config=ContextConfig(history_window=3))
+    packets = builder._gather("查询", history, None, [], builder.config)
+    assert len(packets) == 3
+    assert "第7轮" in packets[0].content
+    assert "第9轮" in packets[2].content
+    # G-e：position 是窗口相对下标（0=最旧），不是全局下标 [7,8,9]
+    assert [p.metadata["position"] for p in packets] == [0, 1, 2]
+
+
+def test_gather_marks_history_position_and_type():
+    """修复 B14：历史消息用 position 承载新近性，不读 msg.timestamp"""
+    history = [Message(role=MessageRole.USER, content=f"第{i}轮") for i in range(3)]
+    builder = ContextBuilder()
+    packets = builder._gather("查询", history, None, [], builder.config)
+    assert [p.metadata["position"] for p in packets] == [0, 1, 2]
+    assert all(p.metadata["type"] == "history" for p in packets)
+    assert packets[0].relevance_score is None
+
+
+def test_gather_fills_token_count_for_custom_packets():
+    custom = ContextPacket(content="自定义信息", timestamp=datetime.now(tz=UTC))
+    builder = ContextBuilder()
+    packets = builder._gather("查询", [], None, [custom], builder.config)
+    assert packets[0].token_count == builder._count_tokens("自定义信息")
+
+
+def test_gather_keeps_explicit_token_count_on_custom_packets():
+    """G-f：显式非零 token_count 是调用方契约，不得被无条件重算覆盖"""
+    custom = ContextPacket(
+        content="自定义信息", timestamp=datetime.now(tz=UTC), token_count=7
+    )
+    builder = ContextBuilder()
+    packets = builder._gather("查询", [], None, [custom], builder.config)
+    assert packets[0].token_count == 7
+
+
+def test_gather_keeps_explicit_relevance_score_on_custom_packets():
+    """修复 B8：预置 0.5 不得被当作「未评分」
+
+    G-g：本例钉的是 absence-of-mangling（_gather 不碰自定义包的
+    relevance_score）；真正的 B8 钉扎（预置值不被重算）在 Task 9 选择阶段。
+    """
+    custom = ContextPacket(
+        content="自定义信息", timestamp=datetime.now(tz=UTC), relevance_score=0.5
+    )
+    builder = ContextBuilder()
+    packets = builder._gather("查询", [], None, [custom], builder.config)
+    assert packets[0].relevance_score == 0.5
+
+
+def test_gather_orders_all_five_sources():
+    """G-i：五来源齐全时的追加顺序，Task 9 贪心填充对顺序敏感"""
+    memory_tool = _FakeTool(data={"hits": _memory_hits("用户喜欢爬山")})
+    rag_tool = _FakeTool(data={"chunks": _memory_hits("向量库配置说明", score=0.9)})
+    history = [Message(role=MessageRole.USER, content="第0轮")]
+    custom = ContextPacket(content="自定义信息", timestamp=datetime.now(tz=UTC))
+    builder = ContextBuilder(memory_tool=memory_tool, rag_tool=rag_tool)
+    packets = builder._gather("查询", history, "你是助手", [custom], builder.config)
+    assert [p.metadata.get("type", "custom") for p in packets] == [
+        "system_instruction",
+        "memory",
+        "rag",
+        "history",
+        "custom",
+    ]

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,7 @@ import tiktoken
 from ..core import Message
 from ..core.exceptions import ConfigError
 from ..tools.base import BaseTool
+from ..tools.response import ToolStatus
 from .base import _SOURCE_TYPES, ContextConfig, ContextPacket
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
@@ -148,3 +150,130 @@ class ContextBuilder:
             hits += scorer_stats["hits"]
             misses += scorer_stats["misses"]
         return hits, misses
+
+    def _system_packet(self, instructions: str) -> ContextPacket:
+        """构造系统指令包，命中缓存时直接复用"""
+        key = hashlib.sha256(instructions.encode("utf-8")).hexdigest()
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        packet = ContextPacket(
+            content=instructions,
+            timestamp=datetime.now(tz=UTC),
+            token_count=self._count_tokens(instructions),
+            relevance_score=1.0,
+            metadata={"type": "system_instruction", "priority": "high"},
+        )
+        self.cache.put(key, packet)
+        return packet
+
+    def _hits_to_packets(
+        self,
+        hits: list[dict[str, Any]],
+        source: str,
+        config: ContextConfig,
+    ) -> list[ContextPacket]:
+        """把工具返回的命中字典转换为候选包，并按阈值过滤"""
+        packets: list[ContextPacket] = []
+        for hit in hits:
+            content = hit.get("content", "")
+            raw_score = hit.get("score")
+            score = 0.0 if raw_score is None else float(raw_score)
+            if score < config.min_source_score:
+                continue
+            metadata = dict(hit.get("metadata") or {})
+            importance = metadata.get("importance")
+            if importance is not None and float(importance) < config.min_importance:
+                continue
+            packets.append(
+                ContextPacket(
+                    content=content,
+                    timestamp=_parse_timestamp(hit.get("created_at")),
+                    token_count=self._count_tokens(content),
+                    relevance_score=score if raw_score is not None else None,
+                    metadata={**metadata, "type": source, "source_score": score},
+                )
+            )
+        return packets
+
+    def _memory_packets(
+        self, user_query: str, config: ContextConfig
+    ) -> list[ContextPacket]:
+        if self.memory_tool is None:
+            return []
+        try:
+            response = self.memory_tool.run(
+                {"action": "recall", "query": user_query, "limit": config.memory_limit}
+            )
+        except Exception as exc:  # noqa: BLE001 - 检索失败一律降级
+            logger.warning("记忆检索失败: %s", exc)
+            return []
+        if getattr(response, "status", None) == ToolStatus.ERROR:
+            logger.warning("记忆检索返回错误: %s", getattr(response, "text", ""))
+            return []
+        hits = (getattr(response, "data", None) or {}).get("hits") or []
+        return self._hits_to_packets(hits, "memory", config)
+
+    def _rag_packets(
+        self, user_query: str, config: ContextConfig
+    ) -> list[ContextPacket]:
+        if self.rag_tool is None:
+            return []
+        try:
+            response = self.rag_tool.run(
+                {"action": "query", "question": user_query, "top_k": config.rag_limit}
+            )
+        except Exception as exc:  # noqa: BLE001 - 检索失败一律降级
+            logger.warning("知识检索失败: %s", exc)
+            return []
+        if getattr(response, "status", None) == ToolStatus.ERROR:
+            logger.warning("知识检索返回错误: %s", getattr(response, "text", ""))
+            return []
+        chunks = (getattr(response, "data", None) or {}).get("chunks") or []
+        return self._hits_to_packets(chunks, "rag", config)
+
+    def _history_packets(
+        self, history: list[Message], config: ContextConfig
+    ) -> list[ContextPacket]:
+        """Message 无 timestamp 字段，故用 metadata["position"] 承载新近性"""
+        window = config.history_window
+        if window <= 0 or not history:
+            return []
+        now = datetime.now(tz=UTC)
+        packets: list[ContextPacket] = []
+        for position, message in enumerate(history[-window:]):
+            content = f"{message.role}: {message.content}"
+            packets.append(
+                ContextPacket(
+                    content=content,
+                    timestamp=now,
+                    token_count=self._count_tokens(content),
+                    metadata={
+                        "type": "history",
+                        "role": message.role,
+                        "position": position,
+                    },
+                )
+            )
+        return packets
+
+    def _gather(
+        self,
+        user_query: str,
+        conversation_history: list[Message],
+        system_instructions: str | None,
+        additional_packets: list[ContextPacket],
+        config: ContextConfig,
+    ) -> list[ContextPacket]:
+        """汇集所有候选信息"""
+        packets: list[ContextPacket] = []
+        if system_instructions:
+            packets.append(self._system_packet(system_instructions))
+        packets.extend(self._memory_packets(user_query, config))
+        packets.extend(self._rag_packets(user_query, config))
+        packets.extend(self._history_packets(conversation_history, config))
+        for packet in additional_packets:
+            if packet.token_count == 0:
+                packet.token_count = self._count_tokens(packet.content)
+            packets.append(packet)
+        return packets

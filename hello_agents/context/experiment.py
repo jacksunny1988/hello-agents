@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +67,12 @@ class ExperimentSpec:
             raise ConfigError("ExperimentSpec.name 不能为空")
         if not self.variants:
             raise ConfigError("ExperimentSpec.variants 不能为空")
+        for name, overrides in self.variants.items():
+            if not isinstance(overrides, dict):
+                raise ConfigError(
+                    f"ExperimentSpec.variants[{name!r}] 必须是 dict，"
+                    f"得到 {type(overrides).__name__}"
+                )
         unknown = {
             key for overrides in self.variants.values() for key in overrides
         } - _OVERRIDABLE_FIELDS
@@ -78,9 +85,18 @@ class ExperimentSpec:
             extra = set(self.weights) - set(self.variants)
             if extra:
                 raise ConfigError(f"weights 多余变体: {sorted(extra)}")
+            invalid = [
+                name
+                for name, weight in self.weights.items()
+                if not isinstance(weight, int | float) or not math.isfinite(weight)
+            ]
+            if invalid:
+                raise ConfigError(f"weights 含非有限数值: {sorted(invalid)}")
             negative = [name for name, weight in self.weights.items() if weight < 0]
             if negative:
                 raise ConfigError(f"weights 不能为负: {sorted(negative)}")
+            if not math.isfinite(sum(self.weights.values())):
+                raise ConfigError("weights 之和超出有限范围")
 
 
 class ExperimentAssigner:
@@ -118,10 +134,19 @@ class ExperimentAssigner:
         重新走一遍全部校验。
         """
         variant = self.assign(spec, unit_id)
+        overrides = spec.variants[variant]
+        # spec 是可变 dataclass：构造后就地塞字段可绕过 __post_init__。
+        # 「不存在的」与「存在但不可覆盖的」字段都必须在 replace 前拦下，
+        # 后者 dataclasses.replace 会静默接受，比 TypeError 更危险。
+        illegal = set(overrides) - _OVERRIDABLE_FIELDS
+        if illegal:
+            raise ConfigError(
+                f"实验变体 {variant} 含超出白名单的字段: {sorted(illegal)}"
+            )
         try:
-            updated = replace(config, **spec.variants[variant])
+            updated = replace(config, **overrides)
         except TypeError as exc:
-            # spec 是可变 dataclass，构造后就地塞非法字段名可绕过 __post_init__
+            # 残余防御：白名单外字段已在上方拦截，此处兜住 dataclasses 自身报错
             raise ConfigError(f"实验变体 {variant} 的字段覆盖非法: {exc}") from exc
         return updated, variant
 

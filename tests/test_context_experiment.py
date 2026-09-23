@@ -2,7 +2,8 @@
 
 覆盖计划 Task 6 的 12 个基线用例，并按必修清单 E1–E9 补齐零覆盖分支、
 修掉恒真断言、补正例与 match= 钉消息，另加公式精确比对用例钉住
-seed / 归一化 / 插入序 / bucket 公式本身。
+seed / 归一化 / 插入序 / bucket 公式本身。第 2 阶段评审后补 S1–S5：
+插入序、白名单 12 收 + 6 拒、apply 复验白名单、variants 值类型、权重数值边界。
 """
 
 import pytest
@@ -10,6 +11,32 @@ import pytest
 from hello_agents.context.base import ContextConfig
 from hello_agents.context.experiment import ExperimentAssigner, ExperimentSpec
 from hello_agents.core import ConfigError
+
+# 12 个合法可覆盖字段（与 _OVERRIDABLE_FIELDS 对齐，参数化钉住成员资格）
+_ALLOWED_FIELDS = [
+    "recency_weight",
+    "relevance_weight",
+    "min_relevance",
+    "max_tokens",
+    "reserve_ratio",
+    "min_budget_ratio",
+    "max_budget_ratio",
+    "history_window",
+    "memory_limit",
+    "rag_limit",
+    "enable_compression",
+    "log_stats",
+]
+
+# 6 个真实存在但不可覆盖的 ContextConfig 字段（反例钉住排除）
+_FORBIDDEN_FIELDS = [
+    "budget_policy",
+    "cache_max_size",
+    "cache_ttl_seconds",
+    "experiment",
+    "min_importance",
+    "min_source_score",
+]
 
 
 def _spec(weights=None) -> ExperimentSpec:
@@ -115,11 +142,11 @@ def test_apply_reruns_config_validation():
 
 def test_apply_rejects_mutated_illegal_field():
     # ExperimentSpec 是可变 dataclass：构造合法 spec 后就地塞非法字段名可绕过
-    # __post_init__。apply() 的 except TypeError 必须转成 ConfigError。
+    # __post_init__。S3 起 apply() 先按白名单复验，「不存在的字段」也走该分支。
     assigner = ExperimentAssigner()
     spec = ExperimentSpec(name="mutated", variants={"control": {"max_tokens": 1000}})
     spec.variants["control"]["not_a_field"] = 1
-    with pytest.raises(ConfigError, match="字段覆盖非法"):
+    with pytest.raises(ConfigError, match="超出白名单"):
         assigner.apply(ContextConfig(), spec, "session-1")
 
 
@@ -238,3 +265,111 @@ def test_config_rejects_non_spec_experiment():
     """experiment 必须是 ExperimentSpec 实例，None 表示不做实验"""
     with pytest.raises(ConfigError, match="ExperimentSpec"):
         ContextConfig(experiment="not-a-spec")
+
+
+# ---------------------------------------------------------------------------
+# S1：插入序（非字母序键名）
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_follows_variants_insertion_order_not_sorted():
+    """钉住 spec §4.4「按 variants 键插入序排列」—— 键名刻意取非字母序"""
+    # 插入序 zzz 先 → 均匀权重下 zzz 累积到 0.5、aaa 累积到 1.0。
+    # 若误写成 sorted()，aaa 先累积，下列期望全部对调。
+    # 期望值由公式手算（uv run python），不用 assign() 自比。
+    spec = ExperimentSpec(name="scoring_v1", variants={"zzz": {}, "aaa": {}})
+    assigner = ExperimentAssigner()
+    assert assigner.assign(spec, "u0") == "zzz"  # bucket≈0.377 → 插入序 zzz
+    assert assigner.assign(spec, "u1") == "aaa"  # bucket≈0.964 → 插入序 aaa
+    assert assigner.assign(spec, "u2") == "zzz"  # bucket≈0.043
+    assert assigner.assign(spec, "u3") == "aaa"  # bucket≈0.572
+    assert assigner.assign(spec, "session-42") == "aaa"  # bucket≈0.542
+
+
+# ---------------------------------------------------------------------------
+# S2：白名单 12 收 + 6 拒
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", _ALLOWED_FIELDS)
+def test_spec_accepts_each_overridable_field(field):
+    # 白名单成员资格：删掉任一字段应让对应参数化行变红
+    value = getattr(ContextConfig(), field)
+    spec = ExperimentSpec(name="allow", variants={"control": {field: value}})
+    assert spec.variants["control"][field] == value
+
+
+@pytest.mark.parametrize("field", _FORBIDDEN_FIELDS)
+def test_spec_rejects_each_non_overridable_field(field):
+    # 真实存在但不可覆盖的字段：加进白名单应让对应参数化行变红
+    with pytest.raises(ConfigError, match="不可覆盖"):
+        ExperimentSpec(name="deny", variants={"control": {field: object()}})
+
+
+# ---------------------------------------------------------------------------
+# S3：apply() 复验白名单（存在但不可覆盖的字段曾静默通过）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["cache_ttl_seconds", "budget_policy", "min_importance"],
+)
+def test_apply_rejects_mutated_non_overridable_field(field):
+    # 这些字段是真实 ContextConfig 属性，dataclasses.replace 不会抛 TypeError，
+    # 必须在 replace 之前按 _OVERRIDABLE_FIELDS 白名单拦下。
+    assigner = ExperimentAssigner()
+    spec = ExperimentSpec(name="mutated", variants={"control": {"max_tokens": 1000}})
+    spec.variants["control"][field] = object()
+    with pytest.raises(ConfigError, match="超出白名单"):
+        assigner.apply(ContextConfig(), spec, "session-1")
+
+
+# ---------------------------------------------------------------------------
+# S4：variants 的值必须是 dict
+# ---------------------------------------------------------------------------
+
+
+def test_spec_rejects_non_dict_variant_int():
+    # 不校验类型时 int 不可迭代，直接 TypeError 而非 ConfigError
+    with pytest.raises(ConfigError, match="必须是 dict"):
+        ExperimentSpec(name="bad", variants={"control": 123})
+
+
+def test_spec_rejects_non_dict_variant_str():
+    # str 可迭代：不校验会把字符当键，误报「不可覆盖: ['a','b','c']」
+    with pytest.raises(ConfigError, match="必须是 dict"):
+        ExperimentSpec(name="bad", variants={"control": "abc"})
+
+
+# ---------------------------------------------------------------------------
+# S5：权重数值边界（NaN / inf / 求和溢出）
+# ---------------------------------------------------------------------------
+
+
+def test_spec_rejects_nan_weight():
+    with pytest.raises(ConfigError, match="含非有限数值"):
+        ExperimentSpec(
+            name="nan",
+            variants={"control": {}, "variant_a": {}},
+            weights={"control": float("nan"), "variant_a": 1.0},
+        )
+
+
+def test_spec_rejects_infinite_weight():
+    with pytest.raises(ConfigError, match="含非有限数值"):
+        ExperimentSpec(
+            name="inf",
+            variants={"control": {}, "variant_a": {}},
+            weights={"control": float("inf"), "variant_a": 1.0},
+        )
+
+
+def test_spec_rejects_weight_sum_overflow():
+    # 单个 1e308 有限，但两权重求和溢出为 inf → 归一化成 0/0 会偏斜到 names[-1]
+    with pytest.raises(ConfigError, match="超出有限范围"):
+        ExperimentSpec(
+            name="overflow",
+            variants={"control": {}, "variant_a": {}},
+            weights={"control": 1e308, "variant_a": 1e308},
+        )

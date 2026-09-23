@@ -38,6 +38,8 @@
 
 **约定**：中文 docstring、PEP 604 类型注解（`str | None`）、**泛型一律用 PEP 695 语法（`class Foo[T]:`，不用 `Generic[T]`）**、`@dataclass`（仅 `core/` 用 pydantic）、ruff（行宽 88；本环境 `requires-python = ">=3.13"` 推出 `target-version = py313`，有效规则集含 `DTZ` / `BLE` / `I` / `F` / `E`（已实测复现））。每个任务结束提交一次，并在收尾时对**本任务触碰的文件**跑 `uv run ruff check` 清零告警。
 
+**校验用例的变异钉扎**：当多条校验共享一个约束（如 `recency_weight + relevance_weight == 1.0` 会让两个权重同时越界），裸 `pytest.raises(ConfigError)` 钉不住任一条分支 —— 删掉一条检查，另一条照样抛同类型异常。此时必须对**每条分支各写一条 `match=` 断言**，且 `match` 模式要避开相邻校验消息的公共子串（例如用 `"必须在"` 后缀而非裸字段名，否则会被和校验的 `"…必须等于 1.0"` 骗过）。写校验用例一律先做变异验证，报告「真实值 vs 变异后值」。
+
 ---
 
 ## Task 1: TTLCache
@@ -867,6 +869,10 @@ class ContextConfig:
             raise ConfigError("reserve_ratio 必须在 [0, 1] 范围内")
         if not 0.0 <= self.min_relevance <= 1.0:
             raise ConfigError("min_relevance 必须在 [0, 1] 范围内")
+        if not 0.0 <= self.relevance_weight <= 1.0:
+            raise ConfigError("relevance_weight 必须在 [0, 1] 范围内")
+        if not 0.0 <= self.recency_weight <= 1.0:
+            raise ConfigError("recency_weight 必须在 [0, 1] 范围内")
         if abs(self.recency_weight + self.relevance_weight - 1.0) >= 1e-6:
             raise ConfigError("recency_weight + relevance_weight 必须等于 1.0")
         if not 0.0 <= self.min_budget_ratio <= self.max_budget_ratio <= 1.0:

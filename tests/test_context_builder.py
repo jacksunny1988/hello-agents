@@ -1480,7 +1480,7 @@ def test_structure_always_includes_task_and_output():
     sections = builder._structure([], "唯一的问题")
     by_title = {section.title: section.body for section in sections}
     assert by_title["Task"] == "唯一的问题"
-    assert "Output" in by_title
+    assert by_title["Output"] == "请基于以上信息，提供准确、有据的回答。"
     assert "Role & Policies" not in by_title
 
 
@@ -1684,3 +1684,140 @@ def test_truncate_section_drops_at_threshold_boundary():
     assert kept is not None
     assert kept.title == "Evidence"
     assert "内容已压缩" in kept.body
+    assert kept.body.endswith("\n[... 内容已压缩 ...]")
+
+
+def test_structure_output_uses_fixed_closing_text():
+    """R2：spec §4.6 明文固定收尾指令，完整字面量逐字钉死
+
+    标题-only（`"Output" in by_title`）对「内容为固定文案」零信息量，
+    换成任意别的收尾语都照过 —— MT-X-1 换成「回答完毕。」后全套件仍绿。
+    """
+    builder = ContextBuilder()
+    sections = builder._structure([], "问题")
+    by_title = {section.title: section.body for section in sections}
+    assert by_title["Output"] == "请基于以上信息，提供准确、有据的回答。"
+
+
+def test_compress_keeps_small_elastic_sections_whole():
+    """R1：RP「优先全额保留」+ 弹性段「贪心全额纳入」主路径必须被点亮
+
+    原套件 8 个 _compress 用例经 settrace 逐行追踪，L511（RP 全额保留）
+    与 L526-527（弹性段全额纳入后 continue）执行次数均为 0 —— 规格 §5.5.1
+    「优先全额保留」与 §5.5.2「贪心全额纳入」的主路径从未执行。删掉 L525-527
+    改成「弹性段一律截断/丢弃」，或删掉 L508-517 改成「RP 一律进
+    _truncate_section」，全部用例仍绿（均已实测）。
+
+    实测校准 max_tokens=400（mandatory(Task+Output)=310，RP 预算 86）：
+    RP「指令」(3 tokens) 与 Evidence「证据」(2 tokens) 均走全额纳入且无标记，
+    Context「上下文」*2000 (6000 tokens) 放不下，截断保段并带完整压缩标记。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Role & Policies", "指令"),
+        ContextSection("Task", "任务" * 300),
+        ContextSection("Evidence", "证据"),
+        ContextSection("Context", "上下文" * 2000),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 400, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == [
+        "Role & Policies",
+        "Task",
+        "Evidence",
+        "Context",
+        "Output",
+    ]
+    # RP 与 Evidence 走全额纳入：body 原样、不带压缩标记
+    assert kept[0].body == "指令"
+    assert kept[2].body == "证据"
+    # Context 首个放不下，截断保段并带完整标记（顺带钉 R3 字面量）
+    assert kept[3].body.endswith("\n[... 内容已压缩 ...]")
+    assert builder._count_tokens(builder._render(kept)) <= 400
+
+
+def test_truncate_section_appends_exact_marker():
+    """R3：压缩标记完整字面量（含 \\n 前缀与 [...] 装饰）逐字钉死
+
+    子串断言 `"内容已压缩" in body` 只钉 5 字核心：去掉 \\n 前缀（MT-X-5）
+    或去掉方括号装饰（MT-R3b）都照过。spec §5.5 明文写的是追加
+    `[... 内容已压缩 ...]`，必须按完整字面量钉，不能只钉子串。
+    """
+    builder = ContextBuilder()
+    section = ContextSection("Evidence", "证据" * 100)
+    kept = builder._truncate_section(section, 200)
+    assert kept is not None
+    assert kept.body.endswith("\n[... 内容已压缩 ...]")
+
+
+def test_compress_skips_at_exact_fit():
+    """R4：恰好装满是边界不动点 —— count(render) == max_tokens 时不得压缩
+
+    MT-X-9 把超限判断 `<=` 改成 `<` 后，等值点会被误判为超限而进入压缩。
+    对照：差 1 token 即触发压缩，钉住 `<=` 的左邻域（阶段 2 的
+    test_select_exact_fit_keeps_all_packets 在压缩侧没有对应点，此处补齐）。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务"),
+        ContextSection("Context", "内容" * 100),
+        ContextSection("Output", "回答"),
+    ]
+    exact = builder._count_tokens(builder._render(sections))
+    kept, compressed = builder._compress(sections, exact, builder.config)
+    assert compressed is False
+    assert kept == sections
+    _, compressed2 = builder._compress(sections, exact - 1, builder.config)
+    assert compressed2 is True
+
+
+def test_truncate_text_identity_at_unit_length():
+    """R5 单位元：max_tokens == token 数时原样返回，不得走 decode 截断路径
+
+    方法论 3（不动点盲区）：普通文本上 decode(tokens[:n]) 与早退在**内容上
+    等价**（BPE 全量解码必还原原文），单位元是不动点，`==` 杀不掉
+    `len <= max` → `len < max`（MT-X-11）。改用含孤立代理项 U+D800 的文本：
+    encode 走 surrogatepass 得到 token，decode 默认 errors='replace' 把代理项
+    换成 U+FFFD，两条路径才可辨。
+
+    方法论 1（re-encode 实测）：目标 n 先实测 `len(encode(text)) == n`
+    （本串 n=31），不从抽样点外推。
+    """
+    builder = ContextBuilder()
+    text = "hello \ud800 world " * 10
+    n = builder._count_tokens(text)
+    assert n == len(builder.encoder.encode(text))
+    assert builder._truncate_text(text, n) == text
+
+
+def test_truncate_text_identity_one_past_unit_length():
+    """R5 对照：max_tokens = n+1 仍在早退区，单位元两侧行为一致
+
+    与单位元断言配套，钉住「不截断」区间是 n 与 n+1 两点，而非只有一点。
+    """
+    builder = ContextBuilder()
+    text = "hello \ud800 world " * 10
+    n = builder._count_tokens(text)
+    assert builder._truncate_text(text, n + 1) == text
+
+
+def test_compress_drops_role_and_policies_when_mandates_overflow():
+    """R6：Task+Output 合计已超预算时 RP 截断预算 ≤ 50，整段丢弃
+
+    builder.py L516 的 False 分支（truncated is None → RP 不入 kept）在原套件
+    中求值 0 次。触发条件：Task+Output 的 mandatory_tokens 已逼近/超过
+    max_tokens，使 RP 预算 ≤ 50。规格 §5.5.1 只说截断 RP、未说丢弃；
+    实现与 §4.6「空段省略」相容，本用例把它钉成契约。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Role & Policies", "指令" * 50),
+        ContextSection("Task", "任务" * 300),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 10, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == ["Task", "Output"]
+    assert kept[0].body == "任务" * 300
+    assert kept[1].body == "回答"

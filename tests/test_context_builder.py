@@ -1787,7 +1787,8 @@ def test_truncate_text_identity_at_unit_length():
     builder = ContextBuilder()
     text = "hello \ud800 world " * 10
     n = builder._count_tokens(text)
-    assert n == len(builder.encoder.encode(text))
+    # 实测字面量（原写成 n == len(encoder.encode(text)) 是恒真自指，杀不掉任何东西）
+    assert n == 31
     assert builder._truncate_text(text, n) == text
 
 

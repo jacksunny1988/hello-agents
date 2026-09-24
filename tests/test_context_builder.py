@@ -677,10 +677,11 @@ def test_gather_defaults_missing_content_to_empty_string():
 
 
 def test_gather_leaves_scoreless_hits_unscored():
-    """G-c：MemoryItem.to_dict() 不含 score，Task 12 前 RAG 在线路径全是缺分命中
+    """G-c：MemoryItem.to_dict() 不含 score，缺分命中按缺分处理
 
     缺 score 时 source_score 记 0.0，relevance_score 留 None 给 Task 9 计算。
-    这是当下主路而非边角，不得被防御式编程省略。
+    Task 12 之后 RAG 在线路径已带 score，但缺分分支仍是承重契约（第三方工具
+    或降级路径可能给出缺分命中），不得被防御式编程省略。
     """
     hits = _memory_hits("缺分命中")
     del hits[0]["score"]
@@ -708,12 +709,51 @@ def test_gather_keeps_explicit_zero_score():
 
 
 def test_gather_drops_scoreless_hits_when_min_source_score_positive():
-    """G-d①：缺 score 按 0.0 过滤，min_source_score>0 时整体丢光（spec 语义）"""
+    """G-d①：缺 score 按 0.0 过滤，min_source_score>0 时整体丢光（spec 语义）
+
+    夹具**显式缺分**（del score 键），不依赖「RAG 天然缺分」那个副作用 ——
+    Task 12 让 RAG 命中带上 score 之后，在线路径不再缺分，本契约改由显式
+    缺分夹具钉住：缺分命中在 min_source_score>0 时被丢。
+    """
     hits = _memory_hits("缺分命中")
     del hits[0]["score"]
     tool = _FakeTool(data={"chunks": hits})
     builder = ContextBuilder(rag_tool=tool, config=ContextConfig(min_source_score=0.1))
     assert builder._gather("向量库", [], None, [], builder.config) == []
+
+
+def test_gather_treats_unparseable_scores_as_missing():
+    """OBS-2：score/importance 转不了 float 时并入缺分路径，不得让 ValueError 穿透 _gather
+
+    spec §6 只承诺 build()/build_result() 不外泄，但 `_hits_to_packets` 的
+    `float(raw_score)` / `float(importance)` 转换护栏该兜住：转换失败按缺分处理
+    （score 视同缺失；importance 视同无此字段，不触发过滤）。
+    """
+    hits = _memory_hits("坏分命中")
+    hits[0]["score"] = "abc"
+    tool = _FakeTool(data={"hits": hits})
+    builder = ContextBuilder(memory_tool=tool)
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].relevance_score is None
+    assert packets[0].metadata["source_score"] == 0.0
+
+    # falsy 但非 None 的坏分（""）同属缺分：变异 `raw_score is None` → `not raw_score`
+    # 会放过 ""（不进 float、不重置 raw_score），relevance_score 从 None 变 0.0。
+    hits = _memory_hits("空串坏分")
+    hits[0]["score"] = ""
+    tool = _FakeTool(data={"hits": hits})
+    builder = ContextBuilder(memory_tool=tool)
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert len(packets) == 1
+    assert packets[0].relevance_score is None
+    assert packets[0].metadata["source_score"] == 0.0
+
+    hits = _memory_hits("坏重要度", importance="abc")
+    tool = _FakeTool(data={"hits": hits})
+    builder = ContextBuilder(memory_tool=tool, config=ContextConfig(min_importance=0.5))
+    packets = builder._gather("查询", [], None, [], builder.config)
+    assert len(packets) == 1
 
 
 def test_gather_skips_history_when_window_is_zero():

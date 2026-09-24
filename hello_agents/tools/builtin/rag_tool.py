@@ -48,7 +48,7 @@ class RAGTool(BaseTool):
             if action == "ingest":
                 return self._do_ingest(params)
             return self._do_query(params)
-        except Exception as error:  # 解析/检索异常不应击穿 Agent 循环
+        except Exception as error:  # noqa: BLE001 - 解析/检索异常不应击穿 Agent 循环
             return ToolResponse.error(code="RAG_ERROR", message=str(error))
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -122,7 +122,9 @@ class RAGTool(BaseTool):
             data={
                 "question": result.question,
                 "generated": result.generated,
-                "chunks": [chunk.to_dict() for chunk in result.chunks],
+                "chunks": [
+                    chunk.to_dict() | {"score": chunk.score} for chunk in result.chunks
+                ],
             },
         )
 

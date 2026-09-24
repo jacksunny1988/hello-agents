@@ -194,13 +194,22 @@ class ContextBuilder:
         for hit in hits:
             content = hit.get("content", "")
             raw_score = hit.get("score")
-            score = 0.0 if raw_score is None else float(raw_score)
+            try:
+                score = 0.0 if raw_score is None else float(raw_score)
+            except (TypeError, ValueError):
+                # 转换失败并入缺分路径，不让 ValueError 穿透 _gather
+                score, raw_score = 0.0, None
             if score < config.min_source_score:
                 continue
             metadata = dict(hit.get("metadata") or {})
             importance = metadata.get("importance")
-            if importance is not None and float(importance) < config.min_importance:
-                continue
+            if importance is not None:
+                try:
+                    if float(importance) < config.min_importance:
+                        continue
+                except (TypeError, ValueError):
+                    # 重要度无法解析时视同缺失，不触发过滤
+                    pass
             packets.append(
                 ContextPacket(
                     content=content,

@@ -1410,3 +1410,277 @@ def test_select_system_tokens_do_not_consume_available_budget():
     )
     assert [packet.content for packet in selected] == ["sys", "other"]
     assert dropped_by_budget == 0
+
+
+# --- Task 10: Structure / Compress ---
+
+
+def _packet(content: str, packet_type: str, tokens: int = 1) -> ContextPacket:
+    return ContextPacket(
+        content=content,
+        timestamp=datetime.now(tz=UTC),
+        token_count=tokens,
+        relevance_score=1.0,
+        metadata={"type": packet_type},
+    )
+
+
+def test_structure_routes_sources_to_sections():
+    builder = ContextBuilder()
+    selected = [
+        _packet("你是助手", "system_instruction"),
+        _packet("知识片段", "rag"),
+        _packet("记忆命中", "memory"),
+    ]
+    sections = builder._structure(selected, "问题")
+    by_title = {section.title: section.body for section in sections}
+    assert by_title["Role & Policies"] == "你是助手"
+    assert by_title["Evidence"] == "知识片段"
+    assert by_title["Context"] == "记忆命中"
+    assert by_title["Task"] == "问题"
+
+
+def test_structure_keeps_template_order():
+    builder = ContextBuilder()
+    # 三包乱序传入：既钉模板顺序，也钉「不许按输入顺序吐出」。
+    # 必须含 system_instruction 包 —— Role & Policies 段是 `if policies:` 有条件添加，
+    # 少了它实际产出只有 4 段（Task/Evidence/Context/Output），期望的 5 段列表会直接红。
+    selected = [
+        _packet("记忆", "memory"),
+        _packet("知识", "rag"),
+        _packet("你是助手", "system_instruction"),
+    ]
+    sections = builder._structure(selected, "问题")
+    assert [section.title for section in sections] == [
+        "Role & Policies",
+        "Task",
+        "Evidence",
+        "Context",
+        "Output",
+    ]
+
+
+def test_structure_honours_evidence_section_override():
+    builder = ContextBuilder()
+    packet = ContextPacket(
+        content="自定义证据",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        relevance_score=1.0,
+        metadata={"type": "custom", "section": "evidence"},
+    )
+    sections = builder._structure([packet], "问题")
+    by_title = {section.title: section.body for section in sections}
+    assert by_title["Evidence"] == "自定义证据"
+    assert "Context" not in by_title
+
+
+def test_structure_always_includes_task_and_output():
+    builder = ContextBuilder()
+    sections = builder._structure([], "唯一的问题")
+    by_title = {section.title: section.body for section in sections}
+    assert by_title["Task"] == "唯一的问题"
+    assert "Output" in by_title
+    assert "Role & Policies" not in by_title
+
+
+def test_structure_joins_multi_hit_bodies():
+    """I-7：多命中段的拼接分隔符逐字钉死，换分隔符/漏拼接都可辨"""
+    builder = ContextBuilder()
+    selected = [
+        _packet("指令一", "system_instruction"),
+        _packet("指令二", "system_instruction"),
+        _packet("证据一", "rag"),
+        _packet("证据二", "rag"),
+        _packet("记忆一", "memory"),
+        _packet("记忆二", "memory"),
+    ]
+    sections = builder._structure(selected, "问题")
+    by_title = {section.title: section.body for section in sections}
+    assert by_title["Role & Policies"] == "指令一\n指令二"
+    assert by_title["Evidence"] == "证据一\n---\n证据二"
+    assert by_title["Context"] == "记忆一\n记忆二"
+
+
+def test_order_restores_template_order():
+    """I-6：_order 直接钉模板序；dict 插入序刻意不等于模板序，「忘排序」可辨"""
+    builder = ContextBuilder()
+    shuffled = {
+        "Output": ContextSection("Output", "回答"),
+        "Context": ContextSection("Context", "内容"),
+        "Task": ContextSection("Task", "任务"),
+        "Evidence": ContextSection("Evidence", "证据"),
+        "Role & Policies": ContextSection("Role & Policies", "指令"),
+    }
+    ordered = builder._order(shuffled)
+    assert [section.title for section in ordered] == [
+        "Role & Policies",
+        "Task",
+        "Evidence",
+        "Context",
+        "Output",
+    ]
+
+
+def test_render_uses_bracketed_titles():
+    builder = ContextBuilder()
+    rendered = builder._render(
+        [ContextSection("Task", "做什么"), ContextSection("Output", "回答")]
+    )
+    assert rendered == "[Task]\n做什么\n\n[Output]\n回答"
+
+
+def test_compress_skips_when_under_budget():
+    builder = ContextBuilder()
+    sections = [ContextSection("Task", "简短"), ContextSection("Output", "回答")]
+    kept, compressed = builder._compress(sections, 1000, builder.config)
+    assert compressed is False
+    assert kept == sections
+
+
+def test_compress_respects_disabled_flag():
+    """修复 B11：enable_compression=False 时不得压缩"""
+    config = ContextConfig(enable_compression=False)
+    builder = ContextBuilder(config)
+    sections = [ContextSection("Task", "很长" * 500), ContextSection("Output", "回答")]
+    kept, compressed = builder._compress(sections, 10, config)
+    assert compressed is False
+    assert kept == sections
+
+
+def test_compress_truncates_oversized_elastic_section():
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务"),
+        ContextSection("Context", "内容" * 2000),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 100, builder.config)
+    assert compressed is True
+    assert builder._count_tokens(builder._render(kept)) <= 100
+    assert [section.title for section in kept] == ["Task", "Context", "Output"]
+    assert "内容已压缩" in kept[1].body
+
+
+def test_compress_drops_elastic_section_when_no_room():
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务"),
+        ContextSection("Context", "内容" * 2000),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 50, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == ["Task", "Output"]
+
+
+def test_compress_never_truncates_task_or_output():
+    """I-3：只看标题对「恒不截断」是零信息量 —— 标题在截断前后完全一样
+
+    Task body 是 "任务"*300，截不截一眼可辨；同时钉死压缩标记不得上身。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务" * 300),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 10, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == ["Task", "Output"]
+    assert kept[0].body == "任务" * 300
+    assert kept[1].body == "回答"
+    assert "内容已压缩" not in kept[0].body
+    assert "内容已压缩" not in kept[1].body
+
+
+def test_compress_never_truncates_task_under_modest_budget():
+    """I-3 配套：max_tokens=200 > 50 时 _truncate_section 会「截断保段」
+
+    预算高于整段丢弃阈值，违规实现把 Task 放进 _truncate_section 后段仍在、
+    标题不变，只有 body 断言能击杀（max_tokens=10 那条会被整段丢弃、先被标题拦下）。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务" * 300),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 200, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == ["Task", "Output"]
+    assert kept[0].body == "任务" * 300
+    assert kept[1].body == "回答"
+    assert "内容已压缩" not in kept[0].body
+
+
+def test_compress_break_skips_later_elastic_section():
+    """I-4：首个放不下的弹性段处理完必须 break，后续弹性段跳过
+
+    夹具 B（实测校准后选用）：Evidence 大到 remaining=35 <= 50 被整段丢弃，
+    Context 小到 render=18 本可装进 max_tokens=50 —— 去掉 break 则 Context 被纳入、
+    标题列表多出 Context，本用例即红。
+    夹具 A（Evidence 截断保段 + 压缩标记）结构性杀不掉 break：_truncate_section
+    截断恒吃满 remaining，去掉 break 后 Context 也装不下，kept 无差异。
+    """
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Task", "任务"),
+        ContextSection("Evidence", "证据" * 2000),
+        ContextSection("Context", "上下文"),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 50, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == ["Task", "Output"]
+
+
+def test_compress_truncates_role_and_policies_when_constants_overflow():
+    builder = ContextBuilder()
+    sections = [
+        ContextSection("Role & Policies", "指令" * 500),
+        ContextSection("Task", "任务"),
+        ContextSection("Output", "回答"),
+    ]
+    kept, compressed = builder._compress(sections, 200, builder.config)
+    assert compressed is True
+    assert [section.title for section in kept] == [
+        "Role & Policies",
+        "Task",
+        "Output",
+    ]
+    assert "内容已压缩" in kept[0].body
+    assert builder._count_tokens(builder._render(kept)) <= 200
+
+
+def test_truncate_text_is_exact_in_tokens():
+    """修复 B10：按 token 精确截断，不再按字符比例猜测
+
+    I-2：原断言 `<= 10` 对「只还 1 个 token」的偷懒实现恒真，改为严格等值
+    （本串 encode 截 10 -> decode -> 再 encode = 10，无 BPE 边界回涨，实测安全）。
+    I-2b：`max_tokens=0` 杀不掉「删掉 <=0 守卫」—— tokens[:0] 解码恒为空串；
+    负数切片 tokens[:-1] 会截出非空串，这才可辨。
+    """
+    builder = ContextBuilder()
+    text = "用户喜欢深蓝色 hello world " * 20
+    truncated = builder._truncate_text(text, 10)
+    assert builder._count_tokens(truncated) == 10
+    assert builder._truncate_text("短文本", 100) == "短文本"
+    assert builder._truncate_text("任意", 0) == ""
+    assert builder._truncate_text(text, -1) == ""
+
+
+def test_truncate_section_drops_at_threshold_boundary():
+    """I-8：budget <= 50 整段丢弃阈值 + _SEPARATOR_MARGIN 余量，都按字面量钉死
+
+    余量不能靠 `render(kept) <= max_tokens` 间接钉 —— 实测 margin=0 时 render
+    恰好等于 max_tokens（100/200 点位都落在 <= 边界上），该断言结构性杀不掉。
+    """
+    from hello_agents.context.builder import _SEPARATOR_MARGIN
+
+    assert _SEPARATOR_MARGIN == 4
+    builder = ContextBuilder()
+    section = ContextSection("Evidence", "证据" * 100)
+    assert builder._truncate_section(section, 50) is None
+    kept = builder._truncate_section(section, 51)
+    assert kept is not None
+    assert kept.title == "Evidence"
+    assert "内容已压缩" in kept.body

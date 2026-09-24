@@ -26,7 +26,13 @@ from ..core import Message
 from ..core.exceptions import ConfigError
 from ..tools.base import BaseTool
 from ..tools.response import ToolStatus
-from .base import _SOURCE_TYPES, ContextConfig, ContextPacket
+from .base import (
+    _SOURCE_TYPES,
+    _TEMPLATE_ORDER,
+    ContextConfig,
+    ContextPacket,
+    ContextSection,
+)
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
 from .experiment import ExperimentAssigner
@@ -35,6 +41,9 @@ from .scoring import KeywordOverlapScorer, RelevanceScorer
 logger = logging.getLogger(__name__)
 
 __all__ = ["ContextBuilder"]
+
+# 渲染时段间插入 "\n\n"，压缩预算需预留的分隔符余量（token）
+_SEPARATOR_MARGIN = 4
 
 
 def _parse_timestamp(raw: Any) -> datetime:
@@ -402,3 +411,127 @@ class ContextBuilder:
                 dropped_by_budget += 1
 
         return selected, dropped_by_relevance, dropped_by_budget
+
+    def _structure(
+        self, selected: list[ContextPacket], user_query: str
+    ) -> list[ContextSection]:
+        """把入选包路由到模板段落，只组织不渲染"""
+        policies: list[str] = []
+        evidence: list[str] = []
+        context: list[str] = []
+        for packet in selected:
+            packet_type = packet.metadata.get("type", "custom")
+            if packet_type == "system_instruction":
+                policies.append(packet.content)
+            elif packet_type == "rag" or packet.metadata.get("section") == "evidence":
+                evidence.append(packet.content)
+            else:
+                context.append(packet.content)
+
+        sections: list[ContextSection] = []
+        if policies:
+            sections.append(ContextSection("Role & Policies", "\n".join(policies)))
+        sections.append(ContextSection("Task", user_query))
+        if evidence:
+            sections.append(ContextSection("Evidence", "\n---\n".join(evidence)))
+        if context:
+            sections.append(ContextSection("Context", "\n".join(context)))
+        sections.append(
+            ContextSection("Output", "请基于以上信息，提供准确、有据的回答。")
+        )
+        return sections
+
+    def _order(self, sections: dict[str, ContextSection]) -> list[ContextSection]:
+        """把标题到段落的映射按模板顺序还原为列表"""
+        return [sections[title] for title in _TEMPLATE_ORDER if title in sections]
+
+    def _render(self, sections: list[ContextSection]) -> str:
+        """把段落列表渲染为最终上下文字符串"""
+        return "\n\n".join(f"[{section.title}]\n{section.body}" for section in sections)
+
+    def _truncate_text(self, text: str, max_tokens: int) -> str:
+        """按 token 精确截断文本"""
+        if max_tokens <= 0:
+            return ""
+        tokens = self.encoder.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        return self.encoder.decode(tokens[:max_tokens])
+
+    def _truncate_section(
+        self, section: ContextSection, budget: int
+    ) -> ContextSection | None:
+        """把段落 body 截断到不超过 budget 个 token；空间过小则整段丢弃"""
+        if budget <= 50:
+            return None
+        marker = "\n[... 内容已压缩 ...]"
+        overhead = self._count_tokens(f"[{section.title}]\n") + self._count_tokens(
+            marker
+        )
+        body = self._truncate_text(section.body, budget - overhead)
+        if not body:
+            return None
+        return ContextSection(section.title, body + marker)
+
+    def _compress(
+        self,
+        sections: list[ContextSection],
+        max_tokens: int,
+        config: ContextConfig,
+    ) -> tuple[list[ContextSection], bool]:
+        """按段优先级压缩
+
+        恒定段 Role & Policies / Task / Output 优先全额保留（仅 Role & Policies
+        允许截断），弹性段按 Evidence -> Context 顺序贪心纳入，首个放不下的弹性段
+        截断后终止。
+        """
+        if not config.enable_compression:
+            return sections, False
+        if self._count_tokens(self._render(sections)) <= max_tokens:
+            return sections, False
+
+        logger.warning(
+            "上下文超限(%d > %d tokens)，执行压缩",
+            self._count_tokens(self._render(sections)),
+            max_tokens,
+        )
+
+        by_title = {section.title: section for section in sections}
+
+        # Task 与 Output 恒不截断，先为它们预留预算
+        kept: dict[str, ContextSection] = {
+            title: by_title[title] for title in ("Task", "Output") if title in by_title
+        }
+        mandatory_tokens = self._count_tokens(self._render(self._order(kept)))
+
+        policies = by_title.get("Role & Policies")
+        if policies is not None:
+            candidate = {**kept, "Role & Policies": policies}
+            if self._count_tokens(self._render(self._order(candidate))) <= max_tokens:
+                kept = candidate
+            else:
+                truncated = self._truncate_section(
+                    policies, max_tokens - mandatory_tokens - _SEPARATOR_MARGIN
+                )
+                if truncated is not None:
+                    kept["Role & Policies"] = truncated
+
+        # 弹性段按 Evidence -> Context 贪心纳入，首个放不下的截断后终止
+        for title in ("Evidence", "Context"):
+            section = by_title.get(title)
+            if section is None:
+                continue
+            candidate = {**kept, title: section}
+            if self._count_tokens(self._render(self._order(candidate))) <= max_tokens:
+                kept = candidate
+                continue
+            remaining = (
+                max_tokens
+                - self._count_tokens(self._render(self._order(kept)))
+                - _SEPARATOR_MARGIN
+            )
+            truncated = self._truncate_section(section, remaining)
+            if truncated is not None:
+                kept[title] = truncated
+            break
+        return self._order(kept), True

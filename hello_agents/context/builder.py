@@ -19,7 +19,7 @@ import logging
 import math
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import tiktoken
 
@@ -38,11 +38,8 @@ from .base import (
 )
 from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
-from .experiment import ExperimentAssigner
+from .experiment import ExperimentAssigner, ExperimentSpec
 from .scoring import KeywordOverlapScorer, RelevanceScorer
-
-if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
-    from .experiment import ExperimentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +47,9 @@ __all__ = ["ContextBuilder"]
 
 # 渲染时段间插入 "\n\n"，压缩预算需预留的分隔符余量（token）
 _SEPARATOR_MARGIN = 4
+
+# 复杂度估计失败时的降级值：给足预算，超限交由压缩阶段兜底
+_DEFAULT_COMPLEXITY = 1.0
 
 
 def _parse_timestamp(raw: Any) -> datetime:
@@ -137,10 +137,16 @@ class ContextBuilder:
         system_instructions: str | None,
     ) -> BudgetInfo:
         """按复杂度缩放预算并拆分为预留 / 可用两部分"""
-        complexity = self.budget_policy.estimate(
-            user_query, history=history, system_instructions=system_instructions
-        )
-        complexity = max(0.0, min(1.0, complexity))
+        try:
+            complexity = self.budget_policy.estimate(
+                user_query, history=history, system_instructions=system_instructions
+            )
+            complexity = max(0.0, min(1.0, complexity))
+        except Exception as exc:  # noqa: BLE001 - 复杂度估计失败一律降级，不外泄
+            logger.warning(
+                "复杂度估计失败，按默认复杂度 %.1f 降级: %s", _DEFAULT_COMPLEXITY, exc
+            )
+            complexity = _DEFAULT_COMPLEXITY
         span = config.max_budget_ratio - config.min_budget_ratio
         scaled = int(config.max_tokens * (config.min_budget_ratio + span * complexity))
         scaled = max(1, scaled)
@@ -575,7 +581,21 @@ class ContextBuilder:
             if session_id:
                 config, variant = self._assigner.apply(config, experiment, session_id)
             else:
+                # spec 是可变 dataclass：构造后把 variants 就地清空可绕过
+                # __post_init__，next() 会裸抛 StopIteration 穿透 build_result，
+                # 违反 §6「除配置错误外不外泄」——此处按配置错误转为 ConfigError。
+                if not experiment.variants:
+                    raise ConfigError("ExperimentSpec.variants 不能为空")
                 variant = next(iter(experiment.variants))
+                # §5.1「使用 variants 键序的首个变体」= 取名 + 应用其覆盖，
+                # 与 apply() 同走「白名单 + replace + __post_init__ 复验」。
+                # 只记名字不 apply 会让 stats.variant 归因与下游 config 不一致。
+                # 单变体 spec 下 apply()->assign() 恒返回该变体，unit_id 不参与。
+                fallback_spec = ExperimentSpec(
+                    name=experiment.name,
+                    variants={variant: experiment.variants[variant]},
+                )
+                config, _ = self._assigner.apply(config, fallback_spec, "")
                 logger.warning(
                     "配置了实验 %s 但未提供 session_id，使用变体 %s",
                     experiment_name,
@@ -627,14 +647,13 @@ class ContextBuilder:
                 if packet.metadata.get("type") != "system_instruction"
             ),
             budget=budget,
-            token_utilization=(
-                final_tokens / budget.scaled_max_tokens
-                if budget.scaled_max_tokens
-                else 0.0
-            ),
+            # scaled_max_tokens 恒 >= 1（_compute_budget 里 max(1, scaled)），
+            # 此处不再留零除护栏；压缩契约：未压缩时 final==structured 恒为 1.0，
+            # 压缩后 structured > max_tokens >= 1，除法不会零除。
+            token_utilization=final_tokens / budget.scaled_max_tokens,
             compressed=compressed,
             compression_ratio=(
-                final_tokens / structured_tokens if structured_tokens else 1.0
+                1.0 if not compressed else final_tokens / structured_tokens
             ),
             cache_hits=after_hits - before_hits,
             cache_misses=after_misses - before_misses,

@@ -1882,6 +1882,22 @@ def _experiment_spec() -> ExperimentSpec:
     )
 
 
+def _fallback_spec() -> ExperimentSpec:
+    """键序首变体 zebra：覆盖值 ≠ 默认，且插入序与字母序可分
+
+    zebra 插入序第一、字母序最后（alpha < zebra）：钉「variants 键序首个」
+    而非「排序首个」。zebra 覆盖 (0.0, 1.0) 与默认 (0.7, 0.3) 不同：钉回退
+    也应用覆盖，而不是只记名字。
+    """
+    return ExperimentSpec(
+        name="fallback_v1",
+        variants={
+            "zebra": {"relevance_weight": 0.0, "recency_weight": 1.0},
+            "alpha": {"relevance_weight": 1.0, "recency_weight": 0.0},
+        },
+    )
+
+
 def _sessions_for_both_variants(spec: ExperimentSpec) -> dict[str, str]:
     """在 session-0..63 内各找一个落入两种变体的 session_id"""
     assigner = ExperimentAssigner()
@@ -2035,10 +2051,16 @@ def test_experiment_override_reaches_downstream_config(monkeypatch):
     builder.build_result("问题", session_id=ids["variant_a"])
     assert seen_configs[-1].relevance_weight == 0.5
     assert seen_configs[-1].recency_weight == 0.5
+    # 基配置不得被就地改写（副本语义）。放在 variant_a 之后、control 之前：
+    # 此时 builder.config 必须仍是默认 (0.7, 0.3)，而下游拿到的是 (0.5, 0.5)。
+    # 若挪到 control 之后断言 0.7，恰与默认值撞车，就地改写也看不出来（假钉扎）。
+    assert seen_configs[-1] is not builder.config
+    assert builder.config.relevance_weight == 0.7
+    assert builder.config.recency_weight == 0.3
     builder.build_result("问题", session_id=ids["control"])
     assert seen_configs[-1].relevance_weight == 0.7
     assert seen_configs[-1].recency_weight == 0.3
-    assert builder.config.relevance_weight == 0.7
+    assert seen_configs[-1] is not builder.config
 
 
 def test_experiment_weights_flip_selection_order():
@@ -2101,7 +2123,38 @@ def test_compression_ratio_reflects_final_over_structured():
 
 
 def test_build_matches_build_result_context():
-    """J-e：build() 必须等于 build_result().context，含压缩路径
+    """J-e：build() 必须等于 build_result().context，全签名非平凡入参
+
+    history / system_instructions / additional_packets / session_id 一次传齐，
+    任一漏传都会让两侧字符串分叉：前三者直接进正文（正文内逐个钉标记），
+    session_id 经实验分流翻转 _flip_packets 名次。
+    """
+    spec = _experiment_spec()
+    ids = _sessions_for_both_variants(spec)
+    # min_relevance=0.0：历史包无预置分，与查询「问题」零重叠会被打成 0.0，
+    # 默认阈值 0.1 会把它们全部相关性淘汰，正文里就看不到转发痕迹了。
+    builder = ContextBuilder(ContextConfig(experiment=spec, min_relevance=0.0))
+    history = [
+        Message(role=MessageRole.USER, content="历史甲"),
+        Message(role=MessageRole.ASSISTANT, content="历史乙"),
+    ]
+    kwargs = {
+        "conversation_history": history,
+        "system_instructions": "系统指令甲",
+        "additional_packets": _flip_packets(),
+        "session_id": ids["variant_a"],
+    }
+    direct = builder.build_result("问题", **kwargs).context
+    via_build = builder.build("问题", **kwargs)
+    assert via_build == direct
+    assert "系统指令甲" in via_build
+    assert "user: 历史甲" in via_build
+    assert "assistant: 历史乙" in via_build
+    assert via_build.index("乙方内容") < via_build.index("甲方内容")
+
+
+def test_build_matches_build_result_context_on_compressed_path():
+    """J-e：压缩路径上 build() 与 build_result().context 仍相等
 
     实测该入参 structured=111 > max_tokens=100 触发压缩；独立实现若跳过
     压缩会整段保留，字符串必然不同。
@@ -2199,3 +2252,190 @@ def test_build_result_with_tools_populates_sources():
     assert result.stats.candidates_by_source["rag"] == 1
     assert "[Evidence]" in result.context
     assert "用户喜欢爬山" in result.context
+
+
+# --- Task 11 评审修复：R1-R5 / R9 / R10 ---
+
+
+class _BoomPolicy:
+    """复杂度策略替身：estimate 恒抛异常，钉 §6 降级而非外泄"""
+
+    name = "boom"
+
+    def estimate(self, query, *, history, system_instructions) -> float:
+        raise RuntimeError("estimate boom")
+
+
+def test_experiment_with_empty_variants_raises_config_error():
+    """R1：构造后把 variants 就地清空，不得外泄 StopIteration（spec §6）
+
+    ExperimentSpec 是可变 dataclass，__post_init__ 只在构造期校验。
+    三条泄漏路径（无 session_id / build / 空串 session_id）都要转 ConfigError。
+    """
+    spec = _experiment_spec()
+    spec.variants = {}
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    with pytest.raises(ConfigError, match="variants 不能为空"):
+        builder.build_result("问题")
+    with pytest.raises(ConfigError, match="variants 不能为空"):
+        builder.build("问题")
+    with pytest.raises(ConfigError, match="variants 不能为空"):
+        builder.build_result("问题", session_id="")
+
+
+def test_experiment_fallback_applies_first_variant_overrides():
+    """R2/R9：无 session_id 回退 = 取键序首变体 + 应用其覆盖
+
+    zebra 覆盖 (0.0, 1.0) ≠ 默认 (0.7, 0.3)：只记名字不 apply 会让
+    下游 config 停留在默认值，本用例直接钉 _select 收到的 config。
+    zebra 插入序第一、字母序最后：iter→iter(sorted) 会翻成 alpha，即红。
+    """
+    spec = _fallback_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    seen_configs: list[ContextConfig] = []
+    original_select = builder._select
+
+    def spy_select(packets, user_query, available_tokens, scaled_max_tokens, config):
+        seen_configs.append(config)
+        return original_select(
+            packets, user_query, available_tokens, scaled_max_tokens, config
+        )
+
+    builder._select = spy_select
+    result = builder.build_result("问题", additional_packets=_flip_packets())
+    assert result.stats.variant == "zebra"
+    assert seen_configs[-1].relevance_weight == 0.0
+    assert seen_configs[-1].recency_weight == 1.0
+    # 覆盖必须真的翻转排序名次，否则 A/B 回退只是装饰
+    assert result.context.index("乙方内容") < result.context.index("甲方内容")
+
+
+def test_experiment_with_empty_session_id_falls_back_to_first_variant(caplog):
+    """R10：空串 session_id 走回退（spec「session_id 为空」），不进 apply() 分流
+
+    `if session_id:` 若被改成 `is not None`，空串会进 apply() 哈希分流
+    （变体不定）且不再告警。两条断言缺一不可。
+    """
+    spec = _fallback_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    with caplog.at_level(logging.WARNING, logger="hello_agents.context"):
+        result = builder.build_result("问题", session_id="")
+    assert result.stats.variant == "zebra"
+    assert any("session_id" in record.message for record in caplog.records)
+
+
+def test_dropped_counts_by_relevance_and_budget_are_exact():
+    """R3：dropped_by_relevance / dropped_by_budget 必须逐字段精确，互换即红
+
+    实测 max_tokens=100、complexity=1.0 → scaled=100、reserved=20、available=80。
+    1 个低相关包（0.0 < min_relevance=0.1）+ 2 个高分 30-token 包入选（60）+
+    2 个 30-token 包超预算（90 > 80）→ (1, 2)。两字段互换成 (2, 1) 即红；
+    只断言 candidates == selected + dropped_r + dropped_b 杀不掉互换（和不变）。
+    """
+    now = datetime.now(tz=UTC)
+    builder = ContextBuilder(
+        ContextConfig(max_tokens=100, budget_policy=_FixedPolicy(1.0))
+    )
+    extra = [
+        ContextPacket(
+            content="低相关",
+            timestamp=now,
+            token_count=10,
+            relevance_score=0.0,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="入选甲",
+            timestamp=now,
+            token_count=30,
+            relevance_score=0.9,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="入选乙",
+            timestamp=now,
+            token_count=30,
+            relevance_score=0.8,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="超预算丙",
+            timestamp=now,
+            token_count=30,
+            relevance_score=0.7,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="超预算丁",
+            timestamp=now,
+            token_count=30,
+            relevance_score=0.6,
+            metadata={"type": "custom"},
+        ),
+    ]
+    stats = builder.build_result("问题", additional_packets=extra).stats
+    assert stats.dropped_by_relevance == 1
+    assert stats.dropped_by_budget == 2
+    assert stats.candidates_total == 5
+    assert stats.selected_total == 2
+
+
+def test_selected_by_source_is_multi_source_with_drops():
+    """R4：多源 + 有淘汰时 selected_by_source ≠ candidates_by_source，逐键钉死
+
+    4 类来源各就位，custom 里 1 个低分包被相关性淘汰 → selected 的 custom=1
+    而 candidates 的 custom=2。`_count_by_source(selected)` 若变异成
+    `_count_by_source(packets)`，selected_by_source 整表与 candidates 同值，即红。
+    """
+    memory_tool = _FakeTool(data={"hits": _memory_hits("记忆甲", "记忆乙", score=0.9)})
+    rag_tool = _FakeTool(data={"chunks": _memory_hits("知识甲", "知识乙", score=0.9)})
+    builder = ContextBuilder(memory_tool=memory_tool, rag_tool=rag_tool)
+    now = datetime.now(tz=UTC)
+    extra = [
+        ContextPacket(
+            content="自定义高分",
+            timestamp=now,
+            relevance_score=0.9,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="自定义低分",
+            timestamp=now,
+            relevance_score=0.0,
+            metadata={"type": "custom"},
+        ),
+    ]
+    stats = builder.build_result(
+        "问题", system_instructions="你是助手", additional_packets=extra
+    ).stats
+    assert stats.candidates_by_source == {
+        "system_instruction": 1,
+        "memory": 2,
+        "rag": 2,
+        "history": 0,
+        "custom": 2,
+    }
+    assert stats.selected_by_source == {
+        "system_instruction": 1,
+        "memory": 2,
+        "rag": 2,
+        "history": 0,
+        "custom": 1,
+    }
+    assert stats.dropped_by_relevance == 1
+    assert stats.dropped_by_budget == 0
+
+
+def test_budget_estimate_failure_degrades_not_raises(caplog):
+    """R5：budget_policy.estimate 抛异常不得外泄（spec §6），降级后仍返回 BuildResult
+
+    降级复杂度取 _DEFAULT_COMPLEXITY=1.0 → scaled == max_tokens（min+span*1.0），
+    超限交由压缩兜底；与工具故障同路径「降级 + logger.warning」。
+    """
+    builder = ContextBuilder(budget_policy=_BoomPolicy())
+    with caplog.at_level(logging.WARNING, logger="hello_agents.context"):
+        result = builder.build_result("问题")
+    assert "[Task]\n问题" in result.context
+    assert result.stats.budget.complexity == 1.0
+    assert result.stats.budget.scaled_max_tokens == builder.config.max_tokens
+    assert any("复杂度估计失败" in record.message for record in caplog.records)

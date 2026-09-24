@@ -1822,3 +1822,340 @@ def test_compress_drops_role_and_policies_when_mandates_overflow():
     assert [section.title for section in kept] == ["Task", "Output"]
     assert kept[0].body == "任务" * 300
     assert kept[1].body == "回答"
+
+
+# --- Task 11: build_result / build ---
+
+import logging
+
+from hello_agents.context.experiment import ExperimentAssigner, ExperimentSpec
+
+
+def _experiment_spec() -> ExperimentSpec:
+    """两个权重互补的变体，control 与默认配置同值"""
+    return ExperimentSpec(
+        name="scoring_v1",
+        variants={
+            "control": {"relevance_weight": 0.7, "recency_weight": 0.3},
+            "variant_a": {"relevance_weight": 0.5, "recency_weight": 0.5},
+        },
+    )
+
+
+def _sessions_for_both_variants(spec: ExperimentSpec) -> dict[str, str]:
+    """在 session-0..63 内各找一个落入两种变体的 session_id"""
+    assigner = ExperimentAssigner()
+    found: dict[str, str] = {}
+    for i in range(64):
+        session_id = f"session-{i}"
+        found.setdefault(assigner.assign(spec, session_id), session_id)
+        if len(found) == 2:
+            return found
+    raise AssertionError("64 个 session_id 未能覆盖两种变体")
+
+
+def _flip_packets() -> list[ContextPacket]:
+    """高相关旧包 vs 低相关新包：control 下甲前乙后，权重一改就翻转
+
+    实测 recency：40 天前 -> 0.1（衰减下限），此刻 -> 1.0。
+    combined：control 甲=0.73/乙=0.44，variant_a 甲=0.55/乙=0.60。
+    """
+    now = datetime.now(tz=UTC)
+    return [
+        ContextPacket(
+            content="甲方内容",
+            timestamp=now - timedelta(days=40),
+            relevance_score=1.0,
+            metadata={"type": "custom"},
+        ),
+        ContextPacket(
+            content="乙方内容",
+            timestamp=now,
+            relevance_score=0.2,
+            metadata={"type": "custom"},
+        ),
+    ]
+
+
+def _compressed_packet() -> ContextPacket:
+    """80 token 的 custom 包：max_tokens=100 时入选后触发压缩"""
+    return ContextPacket(
+        content="上下文内容" * 20,
+        timestamp=datetime.now(tz=UTC),
+        relevance_score=0.9,
+        metadata={"type": "custom"},
+    )
+
+
+def test_build_returns_string_with_task_section():
+    builder = ContextBuilder()
+    context = builder.build("用户想了解什么？")
+    assert isinstance(context, str)
+    assert "[Task]\n用户想了解什么？" in context
+
+
+def test_build_full_pipeline_has_no_type_error():
+    """修复 B4-B7：四阶段调用签名必须一致"""
+    builder = ContextBuilder()
+    history = [Message(role=MessageRole.USER, content="你好")]
+    custom = [ContextPacket(content="附加信息", timestamp=datetime.now(tz=UTC))]
+    result = builder.build_result("问题", history, "你是助手", custom)
+    assert result.context
+    assert result.stats.candidates_total == 3
+
+
+def test_build_result_stats_are_consistent():
+    """J-c/J-g：耗时为正；利用率不设上界，上界由压缩契约兜底"""
+    builder = ContextBuilder()
+    result = builder.build_result("问题", system_instructions="你是助手")
+    stats = result.stats
+    assert stats.candidates_total > 0
+    assert 0.0 < stats.token_utilization
+    assert stats.token_utilization == pytest.approx(
+        stats.final_tokens / stats.budget.scaled_max_tokens
+    )
+    assert stats.budget.available_tokens == (
+        stats.budget.scaled_max_tokens - stats.budget.reserved_tokens
+    )
+    assert stats.budget.requested_max_tokens == builder.config.max_tokens
+    assert stats.duration_ms > 0.0
+    assert stats.experiment is None
+    assert stats.variant is None
+
+
+def test_build_result_counts_selected_by_source():
+    builder = ContextBuilder()
+    result = builder.build_result("问题", system_instructions="你是助手")
+    assert result.stats.selected_by_source["system_instruction"] == 1
+    assert result.stats.selected_tokens == 0  # 系统指令不计入打分包的 token
+
+
+def test_first_build_records_one_cache_miss():
+    """J-f：首次构建记恰好 1 次 miss、0 次 hit"""
+    builder = ContextBuilder()
+    result = builder.build_result("问题", system_instructions="你是助手")
+    assert result.stats.cache_misses == 1
+    assert result.stats.cache_hits == 0
+
+
+def test_second_build_hits_system_instruction_cache():
+    """J-f：二次构建记恰好 1 次 hit、0 次 miss"""
+    builder = ContextBuilder()
+    builder.build_result("问题", system_instructions="你是助手")
+    second = builder.build_result("问题", system_instructions="你是助手")
+    assert second.stats.cache_hits == 1
+    assert second.stats.cache_misses == 0
+
+
+def test_build_result_records_experiment_variant():
+    """J-a：变体名必须与 ExperimentAssigner.assign 一致，实验名落到统计"""
+    spec = _experiment_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    result = builder.build_result("问题", session_id="session-42")
+    assert result.stats.experiment == "scoring_v1"
+    assert result.stats.variant == ExperimentAssigner().assign(spec, "session-42")
+
+
+def test_experiment_assignment_is_stable_for_same_session():
+    """J-a：同一 session_id 连续分流必须稳定"""
+    spec = _experiment_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    first = builder.build_result("问题", session_id="session-42")
+    second = builder.build_result("问题", session_id="session-42")
+    assert first.stats.variant is not None
+    assert first.stats.variant == second.stats.variant
+
+
+def test_experiment_assignment_covers_both_variants():
+    """J-a：32 个 session_id 的分流向量不得退化成单一变体"""
+    spec = _experiment_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    seen = {
+        builder.build_result("问题", session_id=f"session-{i}").stats.variant
+        for i in range(32)
+    }
+    assert seen == {"control", "variant_a"}
+
+
+def test_experiment_override_reaches_downstream_config(monkeypatch):
+    """J-b：覆盖后的 config 必须进入后续阶段，只写变体名不算生效"""
+    spec = _experiment_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    seen_configs: list[ContextConfig] = []
+    original_select = builder._select
+
+    def spy_select(packets, user_query, available_tokens, scaled_max_tokens, config):
+        seen_configs.append(config)
+        return original_select(
+            packets, user_query, available_tokens, scaled_max_tokens, config
+        )
+
+    monkeypatch.setattr(builder, "_select", spy_select)
+    ids = _sessions_for_both_variants(spec)
+    builder.build_result("问题", session_id=ids["variant_a"])
+    assert seen_configs[-1].relevance_weight == 0.5
+    assert seen_configs[-1].recency_weight == 0.5
+    builder.build_result("问题", session_id=ids["control"])
+    assert seen_configs[-1].relevance_weight == 0.7
+    assert seen_configs[-1].recency_weight == 0.3
+    assert builder.config.relevance_weight == 0.7
+
+
+def test_experiment_weights_flip_selection_order():
+    """J-b：权重覆盖必须改变排序名次，否则 A/B 只是装饰"""
+    spec = _experiment_spec()
+    ids = _sessions_for_both_variants(spec)
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    control = builder.build_result(
+        "问题", additional_packets=_flip_packets(), session_id=ids["control"]
+    )
+    assert control.context.index("甲方内容") < control.context.index("乙方内容")
+    variant_a = builder.build_result(
+        "问题", additional_packets=_flip_packets(), session_id=ids["variant_a"]
+    )
+    assert variant_a.context.index("乙方内容") < variant_a.context.index("甲方内容")
+
+
+def test_duration_ms_is_measured_from_perf_counter(monkeypatch):
+    """J-c：duration_ms 必须是 perf_counter 差值，硬编码 0.0 应被杀
+
+    100.25-100.0==0.25 与 0.25*1000==250.0 在 IEEE754 下皆精确，故可严格 ==。
+    """
+    ticks = iter([100.0, 100.25])
+    monkeypatch.setattr(
+        "hello_agents.context.builder.perf_counter", lambda: next(ticks)
+    )
+    builder = ContextBuilder()
+    result = builder.build_result("问题")
+    assert result.stats.duration_ms == 250.0
+
+
+def test_compression_ratio_is_one_when_not_compressed():
+    """J-d：未压缩时 ratio 恰为 1.0，且 final 与 structured 同值"""
+    builder = ContextBuilder()
+    result = builder.build_result("问题", system_instructions="你是助手")
+    assert result.stats.compressed is False
+    assert result.stats.compression_ratio == 1.0
+    assert result.stats.structured_tokens == result.stats.final_tokens
+
+
+def test_compression_ratio_reflects_final_over_structured():
+    """J-d：压缩后 ratio 是 final/structured 且不超过 1.0
+
+    实测 max_tokens=100、complexity=1.0、80 token 包：structured=111、
+    final=96。取倒数得 1.156，会被 <=1.0 与 approx 双重击杀。
+    """
+    builder = ContextBuilder(
+        ContextConfig(max_tokens=100, budget_policy=_FixedPolicy(1.0))
+    )
+    result = builder.build_result("问题", additional_packets=[_compressed_packet()])
+    stats = result.stats
+    assert stats.compressed is True
+    assert stats.structured_tokens == 111
+    assert stats.final_tokens == 96
+    assert stats.compression_ratio <= 1.0
+    assert stats.compression_ratio < 1.0
+    assert stats.compression_ratio == pytest.approx(
+        stats.final_tokens / stats.structured_tokens
+    )
+
+
+def test_build_matches_build_result_context():
+    """J-e：build() 必须等于 build_result().context，含压缩路径
+
+    实测该入参 structured=111 > max_tokens=100 触发压缩；独立实现若跳过
+    压缩会整段保留，字符串必然不同。
+    """
+    builder = ContextBuilder(
+        ContextConfig(max_tokens=100, budget_policy=_FixedPolicy(1.0))
+    )
+    packet = _compressed_packet()
+    direct = builder.build_result("问题", additional_packets=[packet]).context
+    via_build = builder.build("问题", additional_packets=[packet])
+    assert via_build == direct
+    assert "内容已压缩" in via_build
+
+
+def test_build_forwards_session_id():
+    """J-e：build() 必须把 session_id 传下去，漏传会让分流退化成 control"""
+    spec = _experiment_spec()
+    ids = _sessions_for_both_variants(spec)
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    session_id = ids["variant_a"]
+    via_build = builder.build(
+        "问题", additional_packets=_flip_packets(), session_id=session_id
+    )
+    direct = builder.build_result(
+        "问题", additional_packets=_flip_packets(), session_id=session_id
+    ).context
+    assert via_build == direct
+    assert via_build.index("乙方内容") < via_build.index("甲方内容")
+
+
+def test_oversized_task_keeps_body_and_utilization_can_exceed_one():
+    """J-g：Task 恒不截断时利用率可 > 1.0，不得被钳位到 1.0
+
+    实测 query 500 token、max_tokens=100：structured=final=526、util=5.26，
+    压缩后只余 Task/Output，Task body 必须原样在场（I-3）。
+    """
+    query = "任务" * 500
+    builder = ContextBuilder(
+        ContextConfig(max_tokens=100, budget_policy=_FixedPolicy(1.0))
+    )
+    result = builder.build_result(query)
+    stats = result.stats
+    assert stats.compressed is True
+    assert f"[Task]\n{query}" in result.context
+    assert stats.budget.scaled_max_tokens == 100
+    assert stats.final_tokens == 526
+    assert stats.token_utilization > 1.0
+    assert stats.token_utilization == pytest.approx(
+        stats.final_tokens / stats.budget.scaled_max_tokens
+    )
+
+
+def test_experiment_without_session_id_falls_back_to_first_variant(caplog):
+    spec = _experiment_spec()
+    builder = ContextBuilder(ContextConfig(experiment=spec))
+    with caplog.at_level(logging.WARNING, logger="hello_agents.context"):
+        result = builder.build_result("问题")
+    assert result.stats.variant == "control"
+    assert any("session_id" in record.message for record in caplog.records)
+
+
+def test_log_stats_emits_info_summary(caplog):
+    builder = ContextBuilder()
+    with caplog.at_level(logging.INFO, logger="hello_agents.context"):
+        builder.build_result("问题")
+    assert any("candidates=" in record.message for record in caplog.records)
+
+
+def test_log_stats_can_be_disabled(caplog):
+    builder = ContextBuilder(ContextConfig(log_stats=False))
+    with caplog.at_level(logging.INFO, logger="hello_agents.context"):
+        builder.build_result("问题")
+    assert not any("candidates=" in record.message for record in caplog.records)
+
+
+def test_tool_failure_does_not_break_build():
+    """修复 B13：工具失败必须降级而非抛出"""
+    tool = _FakeTool(raises=RuntimeError("boom"))
+    builder = ContextBuilder(memory_tool=tool)
+    result = builder.build_result("问题")
+    assert "[Task]" in result.context
+    assert result.stats.candidates_by_source["memory"] == 0
+
+
+def test_build_result_with_tools_populates_sources():
+    memory_tool = _FakeTool(data={"hits": _memory_hits("用户喜欢爬山", score=0.9)})
+    rag_tool = _FakeTool(data={"chunks": _memory_hits("向量库说明", score=0.9)})
+    builder = ContextBuilder(
+        ContextConfig(relevance_weight=0.5, recency_weight=0.5),
+        memory_tool=memory_tool,
+        rag_tool=rag_tool,
+    )
+    result = builder.build_result("爬山")
+    assert result.stats.candidates_by_source["memory"] == 1
+    assert result.stats.candidates_by_source["rag"] == 1
+    assert "[Evidence]" in result.context
+    assert "用户喜欢爬山" in result.context

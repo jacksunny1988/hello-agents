@@ -18,7 +18,8 @@ import hashlib
 import logging
 import math
 from datetime import UTC, datetime
-from typing import Any
+from time import perf_counter
+from typing import TYPE_CHECKING, Any
 
 import tiktoken
 
@@ -29,6 +30,8 @@ from ..tools.response import ToolStatus
 from .base import (
     _SOURCE_TYPES,
     _TEMPLATE_ORDER,
+    BuildResult,
+    BuildStats,
     ContextConfig,
     ContextPacket,
     ContextSection,
@@ -37,6 +40,9 @@ from .budget import BudgetInfo, BudgetPolicy, HeuristicBudgetPolicy
 from .cache import TTLCache
 from .experiment import ExperimentAssigner
 from .scoring import KeywordOverlapScorer, RelevanceScorer
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    from .experiment import ExperimentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -535,3 +541,116 @@ class ContextBuilder:
                 kept[title] = truncated
             break
         return self._order(kept), True
+
+    def build_result(
+        self,
+        user_query: str,
+        conversation_history: list[Message] | None = None,
+        system_instructions: str | None = None,
+        additional_packets: list[ContextPacket] | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> BuildResult:
+        """构建上下文并返回上下文与统计"""
+        started = perf_counter()
+        history = list(conversation_history or [])
+        packets_input = list(additional_packets or [])
+        config = self.config
+        experiment: ExperimentSpec | None = config.experiment
+        experiment_name: str | None = None
+        variant: str | None = None
+
+        # 阶段 0：实验分流
+        if experiment is not None:
+            experiment_name = experiment.name
+            if session_id:
+                config, variant = self._assigner.apply(config, experiment, session_id)
+            else:
+                variant = next(iter(experiment.variants))
+                logger.warning(
+                    "配置了实验 %s 但未提供 session_id，使用变体 %s",
+                    experiment_name,
+                    variant,
+                )
+
+        before_hits, before_misses = self._cache_counters()
+
+        # 阶段 1：汇集
+        packets = self._gather(
+            user_query, history, system_instructions, packets_input, config
+        )
+        budget = self._compute_budget(config, user_query, history, system_instructions)
+
+        # 阶段 2：选择
+        selected, dropped_by_relevance, dropped_by_budget = self._select(
+            packets,
+            user_query,
+            budget.available_tokens,
+            budget.scaled_max_tokens,
+            config,
+        )
+
+        # 阶段 3：组织
+        sections = self._structure(selected, user_query)
+        structured_tokens = self._count_tokens(self._render(sections))
+
+        # 阶段 4：压缩
+        kept_sections, compressed = self._compress(
+            sections, budget.scaled_max_tokens, config
+        )
+        context = self._render(kept_sections)
+        final_tokens = self._count_tokens(context)
+
+        after_hits, after_misses = self._cache_counters()
+
+        stats = BuildStats(
+            candidates_total=len(packets),
+            candidates_by_source=_count_by_source(packets),
+            selected_total=len(selected),
+            selected_by_source=_count_by_source(selected),
+            dropped_by_relevance=dropped_by_relevance,
+            dropped_by_budget=dropped_by_budget,
+            structured_tokens=structured_tokens,
+            final_tokens=final_tokens,
+            selected_tokens=sum(
+                packet.token_count
+                for packet in selected
+                if packet.metadata.get("type") != "system_instruction"
+            ),
+            budget=budget,
+            token_utilization=(
+                final_tokens / budget.scaled_max_tokens
+                if budget.scaled_max_tokens
+                else 0.0
+            ),
+            compressed=compressed,
+            compression_ratio=(
+                final_tokens / structured_tokens if structured_tokens else 1.0
+            ),
+            cache_hits=after_hits - before_hits,
+            cache_misses=after_misses - before_misses,
+            duration_ms=(perf_counter() - started) * 1000,
+            experiment=experiment_name,
+            variant=variant,
+        )
+        if config.log_stats:
+            logger.info("%s", stats.summary())
+        return BuildResult(context=context, stats=stats)
+
+    def build(
+        self,
+        user_query: str,
+        conversation_history: list[Message] | None = None,
+        system_instructions: str | None = None,
+        additional_packets: list[ContextPacket] | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        """构建上下文，仅返回上下文字符串（向后兼容入口）"""
+        return self.build_result(
+            user_query,
+            conversation_history,
+            system_instructions,
+            additional_packets,
+            session_id=session_id,
+        ).context

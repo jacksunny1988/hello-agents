@@ -850,6 +850,32 @@ class _ShortListScorer:
         return list(self.values)
 
 
+class _LongListScorer:
+    """打分器替身：返回比请求数更多的分数，验证超额不设防会被抓（F5）"""
+
+    def __init__(self, values: list[float]) -> None:
+        self.values = values
+
+    def score(self, content: str, query: str) -> float:
+        return self.values[0] if self.values else 0.0
+
+    def score_many(self, contents: list[str], query: str) -> list[float]:
+        return list(self.values)
+
+
+class _OutOfRangeScorer:
+    """打分器替身：返回越界分数，验证写入前钳位到 [0,1]（F7）"""
+
+    def __init__(self, values: list[float]) -> None:
+        self.values = values
+
+    def score(self, content: str, query: str) -> float:
+        return self.values[0] if self.values else 0.0
+
+    def score_many(self, contents: list[str], query: str) -> list[float]:
+        return list(self.values)
+
+
 def _select_config(**overrides) -> ContextConfig:
     base = {"relevance_weight": 1.0, "recency_weight": 0.0, "min_relevance": 0.0}
     base.update(overrides)
@@ -857,7 +883,11 @@ def _select_config(**overrides) -> ContextConfig:
 
 
 def test_select_does_not_rescore_explicit_half_score():
-    """修复 B8：预置 0.5 不得被重算，None 才重算"""
+    """修复 B8：预置分数不得被重算，None 才重算
+
+    F4：补预置 0.0 的 other 包 —— `is None` 若误写成 falsy 判断，0.0 会被
+    误判待算并被 spy 重算，`scored` 会多出 "zero"、zero 分会被改写。
+    """
     scorer = _SpyScorer(0.1)
     config = _select_config()
     builder = ContextBuilder(config, relevance_scorer=scorer)
@@ -867,12 +897,19 @@ def test_select_does_not_rescore_explicit_half_score():
         token_count=1,
         relevance_score=0.5,
     )
+    zero = ContextPacket(
+        content="zero",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        relevance_score=0.0,
+    )
     unscored = ContextPacket(
         content="unscored", timestamp=datetime.now(tz=UTC), token_count=1
     )
-    builder._select([explicit, unscored], "q", 100, 100, config)
-    assert scorer.scored == ["unscored"]
+    builder._select([explicit, zero, unscored], "q", 100, 100, config)
+    assert scorer.scored == ["unscored"]  # 不含 "zero"：0.0 是预置值而非待算
     assert explicit.relevance_score == 0.5
+    assert zero.relevance_score == 0.0
     assert unscored.relevance_score == 0.1
 
 
@@ -981,8 +1018,8 @@ def test_select_ranks_history_by_position():
     assert [packet.content for packet in selected] == ["新", "旧"]
     # H-f 端点：count=2 → span=1 → position=1 得 1.0、position=0 得 0.5
     # 若误写 span = history_count（=2），position=1 只会得 0.75
-    assert builder._recency_of(newer, 2) == pytest.approx(1.0)
-    assert builder._recency_of(older, 2) == pytest.approx(0.5)
+    assert builder._recency_of(newer, 2) == 1.0  # 严格 ==，钳位精确
+    assert builder._recency_of(older, 2) == 0.5
 
 
 def test_recency_decays_with_age():
@@ -990,7 +1027,7 @@ def test_recency_decays_with_age():
     fresh = builder._calculate_recency(datetime.now(tz=UTC))
     stale = builder._calculate_recency(datetime.now(tz=UTC) - timedelta(days=30))
     assert fresh > stale
-    assert 0.1 <= stale <= 1.0
+    assert stale == 0.1  # 30 天 exp(-3)≈0.0498 必触底，具体值而非区间
     assert 0.1 <= fresh <= 1.0
 
 
@@ -1002,7 +1039,7 @@ def test_recency_decay_rate_pinned_at_day_boundary():
     at_day = builder._calculate_recency(datetime.now(tz=UTC) - timedelta(hours=24))
     assert at_day == pytest.approx(math.exp(-0.1))
     at_zero = builder._calculate_recency(datetime.now(tz=UTC) + timedelta(seconds=1))
-    assert at_zero == pytest.approx(1.0)
+    assert at_zero == 1.0  # 严格 ==，age=0 时 exp(0)=1.0 精确
 
 
 def test_recency_handles_timezone_aware_timestamp():
@@ -1086,9 +1123,10 @@ def test_select_combines_weighted_sum_not_product():
         metadata={"type": "history", "position": 0},
     )
     # 分量锚点：A 的 30 天前时间戳 exp(-3)≈0.05 被钳到 0.1；B 的 position=0 精确 0.5
-    assert builder._calculate_recency(packet_a.timestamp) == pytest.approx(0.1)
-    assert builder._recency_of(packet_b, 1) == pytest.approx(0.5)
-    selected, _, _ = builder._select([packet_a, packet_b], "q", 100, 100, config)
+    assert builder._calculate_recency(packet_a.timestamp) == 0.1  # 下钳位精确
+    assert builder._recency_of(packet_b, 1) == 0.5
+    # 插入序与期望序相反，「忘排序」变异会被杀
+    selected, _, _ = builder._select([packet_b, packet_a], "q", 100, 100, config)
     assert [packet.content for packet in selected] == ["A", "B"]
 
 
@@ -1136,3 +1174,239 @@ def test_select_degrades_when_scorer_returns_short_list():
     assert first.relevance_score == 0.0
     assert second.relevance_score == 0.0
     assert [packet.content for packet in selected] == ["甲", "乙"]
+
+
+def test_select_tolerates_naive_custom_packet_timestamp():
+    """spec §6：naive 时间戳不得让 TypeError 穿透 _select（S1-1 / F1）
+
+    custom 包的 timestamp 是调用方给的裸 datetime，可能 naive。_recency_of
+    必须走 _parse_timestamp 归一（解析处归一），不得裸做 naive/aware 减法。
+    """
+    config = _select_config()
+    builder = ContextBuilder(config)
+    naive_packet = ContextPacket(
+        content="naive",
+        timestamp=datetime(2026, 9, 23, 10, 0, 0),  # noqa: DTZ001
+        token_count=1,
+        relevance_score=0.9,
+    )
+    aware_packet = ContextPacket(
+        content="aware",
+        timestamp=datetime(2026, 9, 23, 10, 0, 0, tzinfo=UTC),
+        token_count=1,
+        relevance_score=0.9,
+    )
+    selected, _, _ = builder._select(
+        [naive_packet, aware_packet], "q", 100, 100, config
+    )
+    assert len(selected) == 2
+    # 等值时刻 → recency 相等（走 _parse_timestamp 归一）。
+    # 两次 _calculate_recency 各自采样 datetime.now()，严格 == 结构性不可达
+    # （实测 200 次 0 命中、最大差 2.6e-11），曲线区按房规用 approx 交叉比对。
+    assert builder._recency_of(naive_packet, 0) == pytest.approx(
+        builder._recency_of(aware_packet, 0)
+    )
+    # 触底区两包同钳到 0.1，严格 == 可确定性命中，钉住「naive 归一后与 aware 同值」
+    old_naive = ContextPacket(
+        content="old-naive",
+        timestamp=datetime(2020, 1, 1),  # noqa: DTZ001
+        token_count=1,
+        relevance_score=0.9,
+    )
+    old_aware = ContextPacket(
+        content="old-aware",
+        timestamp=datetime(2020, 1, 1, tzinfo=UTC),
+        token_count=1,
+        relevance_score=0.9,
+    )
+    assert builder._recency_of(old_naive, 0) == builder._recency_of(old_aware, 0)
+    assert builder._recency_of(old_naive, 0) == 0.1
+
+
+def test_recency_history_span_midpoint():
+    """H-f 补强：n=3 中点钉住 span 分母（S1-2 / S2-1）
+
+    n≤2 时「position/span」「省略 span」「span=history_count」三者同值，
+    端点断言结构性杀不掉分母；n=3 中点三者互异：0.75 / 1.0 / 0.667。
+    """
+    builder = ContextBuilder()
+    oldest = ContextPacket(
+        content="旧",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        relevance_score=1.0,
+        metadata={"type": "history", "position": 0},
+    )
+    mid = ContextPacket(
+        content="中",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        relevance_score=1.0,
+        metadata={"type": "history", "position": 1},
+    )
+    newest = ContextPacket(
+        content="新",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        relevance_score=1.0,
+        metadata={"type": "history", "position": 2},
+    )
+    # span = max(3-1, 1) = 2 → 中点 0.5+0.5*(1/2) = 0.75（二进制精确）
+    assert builder._recency_of(mid, 3) == 0.75
+    assert builder._recency_of(oldest, 3) == 0.5
+    assert builder._recency_of(newest, 3) == 1.0
+
+
+def test_select_weighted_sum_not_max():
+    """H-e 补强：加权和公式不是 max（S1-3 / F3）
+
+    不等权 w=(0.7, 0.3)：
+      A: rel=0.3, rec=1.0 → 加权和 0.510 / max(0.21, 0.30) = 0.300
+      B: rel=0.6, rec=0.2 → 加权和 0.480 / max(0.42, 0.06) = 0.420
+    加权和 A>B，max 则 B>A —— 排序正好相反。插入序与期望序相反。
+    """
+    config = _select_config(relevance_weight=0.7, recency_weight=0.3)
+    builder = ContextBuilder(config)
+    packet_a = ContextPacket(
+        content="A",
+        timestamp=datetime.now(tz=UTC)
+        + timedelta(hours=1),  # age 钳到 0 → rec 精确 1.0
+        token_count=1,
+        relevance_score=0.3,
+    )
+    packet_b = ContextPacket(
+        content="B",
+        timestamp=datetime.now(tz=UTC) - timedelta(days=16),  # exp(-1.6)≈0.202
+        token_count=1,
+        relevance_score=0.6,
+    )
+    assert builder._calculate_recency(packet_a.timestamp) == 1.0
+    assert builder._calculate_recency(packet_b.timestamp) == pytest.approx(
+        0.2, abs=0.01
+    )
+    selected, _, _ = builder._select([packet_b, packet_a], "q", 100, 100, config)
+    assert [packet.content for packet in selected] == ["A", "B"]
+
+
+def test_select_weighted_sum_weights_matter():
+    """H-e 补强：权重必须生效，公式不是 rel+rec（S1-3 / F3）
+
+    不等权 w=(0.9, 0.1)：
+      A: rel=0.5, rec=0.1 → 加权和 0.460 / rel+rec = 0.600
+      B: rel=0.2, rec=0.9 → 加权和 0.270 / rel+rec = 1.100
+    加权和 A>B，rel+rec 则 B>A —— 排序正好相反。插入序与期望序相反。
+    """
+    config = _select_config(relevance_weight=0.9, recency_weight=0.1)
+    builder = ContextBuilder(config)
+    packet_a = ContextPacket(
+        content="A",
+        timestamp=datetime.now(tz=UTC) - timedelta(days=30),  # exp(-3) 钳到 0.1
+        token_count=1,
+        relevance_score=0.5,
+    )
+    packet_b = ContextPacket(
+        content="B",
+        timestamp=datetime.now(tz=UTC) - timedelta(hours=25),  # exp(-0.104)≈0.901
+        token_count=1,
+        relevance_score=0.2,
+    )
+    assert builder._calculate_recency(packet_a.timestamp) == 0.1
+    assert builder._calculate_recency(packet_b.timestamp) == pytest.approx(
+        0.9, abs=0.01
+    )
+    selected, _, _ = builder._select([packet_b, packet_a], "q", 100, 100, config)
+    assert [packet.content for packet in selected] == ["A", "B"]
+
+
+def test_select_degrades_when_scorer_returns_long_list():
+    """F5：score_many 返回长列表不得静默 zip 丢弃多余分，长度不等整批降级
+
+    静默配对会让 first=0.9、second=0.8（多余的 0.7 被忽略）；整批降级则两者都是 0.0。
+    """
+    config = _select_config()
+    builder = ContextBuilder(config, relevance_scorer=_LongListScorer([0.9, 0.8, 0.7]))
+    first = ContextPacket(content="甲", timestamp=datetime.now(tz=UTC), token_count=1)
+    second = ContextPacket(content="乙", timestamp=datetime.now(tz=UTC), token_count=1)
+    selected, _, _ = builder._select([first, second], "q", 100, 100, config)
+    assert first.relevance_score == 0.0
+    assert second.relevance_score == 0.0
+    assert [packet.content for packet in selected] == ["甲", "乙"]
+
+
+def test_select_exact_fit_keeps_all_packets():
+    """F6：恰好装满边界 —— 合计 token 等于 available_tokens 必须全部入选
+
+    2+3 == 5：`<=` 成立；若误写 `<`，后包被挤出。
+    """
+    config = _select_config()
+    builder = ContextBuilder(config)
+    first = ContextPacket(
+        content="p2",
+        timestamp=datetime.now(tz=UTC),
+        token_count=2,
+        relevance_score=0.9,
+    )
+    second = ContextPacket(
+        content="p3",
+        timestamp=datetime.now(tz=UTC),
+        token_count=3,
+        relevance_score=0.8,
+    )
+    selected, _, dropped_by_budget = builder._select(
+        [first, second], "q", 5, 100, config
+    )
+    assert [packet.content for packet in selected] == ["p2", "p3"]
+    assert dropped_by_budget == 0
+
+
+def test_select_clamps_out_of_range_scores():
+    """F7：打分越界必须钳到 [0,1] 再落库，保持 relevance_score 不变量"""
+    config = _select_config()
+    builder = ContextBuilder(config, relevance_scorer=_OutOfRangeScorer([1.5, -0.2]))
+    high = ContextPacket(content="high", timestamp=datetime.now(tz=UTC), token_count=1)
+    low = ContextPacket(content="low", timestamp=datetime.now(tz=UTC), token_count=1)
+    builder._select([high, low], "q", 100, 100, config)
+    assert high.relevance_score == 1.0  # 严格 ==，勿 approx（会吞 2ulp）
+    assert low.relevance_score == 0.0
+
+
+def test_select_does_not_score_system_instructions():
+    """F12：system 包不参与评分，spy 只应看到 other 包"""
+    scorer = _SpyScorer(0.9)
+    config = _select_config()
+    builder = ContextBuilder(config, relevance_scorer=scorer)
+    system = ContextPacket(
+        content="sys",
+        timestamp=datetime.now(tz=UTC),
+        token_count=1,
+        metadata={"type": "system_instruction"},
+    )
+    other = ContextPacket(
+        content="other", timestamp=datetime.now(tz=UTC), token_count=1
+    )
+    builder._select([system, other], "q", 100, 100, config)
+    assert scorer.scored == ["other"]
+
+
+def test_select_system_tokens_do_not_consume_available_budget():
+    """F13：system 包 token 不参与 available_tokens 竞争 —— 50+60>100 仍双双入选"""
+    config = _select_config()
+    builder = ContextBuilder(config)
+    system = ContextPacket(
+        content="sys",
+        timestamp=datetime.now(tz=UTC),
+        token_count=50,
+        relevance_score=1.0,
+        metadata={"type": "system_instruction"},
+    )
+    other = ContextPacket(
+        content="other",
+        timestamp=datetime.now(tz=UTC),
+        token_count=60,
+        relevance_score=1.0,
+    )
+    selected, _, dropped_by_budget = builder._select(
+        [system, other], "q", 100, 100, config
+    )
+    assert [packet.content for packet in selected] == ["sys", "other"]
+    assert dropped_by_budget == 0

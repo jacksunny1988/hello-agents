@@ -295,12 +295,14 @@ class ContextBuilder:
         """历史消息按 position 线性映射到 [0.5, 1.0]，其余按时间戳衰减
 
         ``metadata["position"]`` 是窗口相对下标（0=最旧，n-1=最新），由 _gather 写入。
+        非历史包的时间戳先经 ``_parse_timestamp`` 归一（解析处归一，可容 naive），
+        ``_calculate_recency`` 仍直接消费其出口，函数体内不做二次归一。
         """
         if packet.metadata.get("type") == "history":
             position = int(packet.metadata.get("position", 0))
             span = max(history_count - 1, 1)
             return max(0.5, min(1.0, 0.5 + 0.5 * (position / span)))
-        return self._calculate_recency(packet.timestamp)
+        return self._calculate_recency(_parse_timestamp(packet.timestamp))
 
     def _select(
         self,
@@ -352,12 +354,11 @@ class ContextBuilder:
                 )
             except Exception as exc:  # noqa: BLE001 - 打分失败一律降级，不外泄
                 logger.warning("相关性打分失败，该批按 0.0 分降级: %s", exc)
-                scores = []
                 for packet in unscored:
                     packet.relevance_score = 0.0
             else:
                 if len(scores) != len(unscored):
-                    # 第二道防线：短/长列表都会让 zip 静默错位，整批降级
+                    # 第二道防线：短列表会静默截断、长列表会混入无效分，长度不等一律整批降级
                     logger.warning(
                         "打分器返回 %d 个分数，与 %d 个待打分包不符，整批按 0.0 分降级",
                         len(scores),

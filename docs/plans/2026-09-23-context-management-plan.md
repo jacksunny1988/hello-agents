@@ -153,6 +153,7 @@ from time import monotonic
 
 __all__ = ["TTLCache"]
 
+
 class TTLCache[K, V]:
     """带 TTL 与 LRU 淘汰的缓存
 
@@ -3232,7 +3233,9 @@ Expected: FAIL — `AssertionError: ContextBuilder 未导出`
 按相关性与新近性打分排序后组织成结构化模板，并按需压缩。
 
 零外部依赖即可运行：不注入工具与向量服务时，仅凭系统指令、对话历史与
-自定义信息包也能工作；配置 dashscope 等后端后自动升级为向量相关性打分。
+自定义信息包也能工作。默认相关性打分为关键词重叠；需要向量相似度时可显式
+传入 `EmbeddingSimilarityScorer` 或使用 `create_relevance_scorer("auto")`
+自动降级。
 
 典型用法：
     from hello_agents.context import ContextBuilder, ContextConfig
@@ -3710,7 +3713,7 @@ Expected: 五节全部输出，无异常
 2. `ruff check` 与 `ruff format --check` 通过 → 由 Step 2、3 覆盖
 3. 无 `DASHSCOPE_API_KEY` 时示例可跑通 → 由 Step 4 覆盖
 4. `build()` 返回 `str` 且含 `[Task]` 段 → 由 `test_build_returns_string_with_task_section` 覆盖
-5. `stats` 满足 `candidates_total > 0`、`0 < token_utilization <= 1.0`、`available == scaled - reserved` → 由 `test_build_result_stats_are_consistent` 覆盖
+5. `stats` 满足 `candidates_total > 0`、`token_utilization > 0`（**不设上界**：`Task`/`Output` 段恒不截断，可能超出预算；上界由压缩契约兜底）、`budget.available_tokens == budget.scaled_max_tokens - budget.reserved_tokens` → 由 `test_build_result_stats_are_consistent` 覆盖
 6. 同一 `session_id` 两次 `assign()` 结果相同 → 由 `test_assignment_is_stable_for_same_unit` 覆盖
 7. 缓存二次构建 `cache_hits > 0` → 由 `test_second_build_hits_system_instruction_cache` 覆盖
 

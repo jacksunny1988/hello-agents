@@ -12,7 +12,8 @@ uv sync
 可选能力通过 extras 安装：
 
 ```bash
-uv sync --extra qdrant --extra neo4j --extra rag --extra local
+uv sync --extra qdrant --extra neo4j --extra dashscope --extra rag --extra local
+# 或一次性装齐：uv sync --extra all
 ```
 
 ## 模块概览
@@ -35,7 +36,7 @@ uv sync --extra qdrant --extra neo4j --extra rag --extra local
 ```python
 from hello_agents.context import ContextBuilder, ContextConfig
 
-history = []
+history = []  # list[Message]，元素为 hello_agents.core.Message(role=…, content=…)
 builder = ContextBuilder(ContextConfig(max_tokens=4096))
 context = builder.build("用户想了解什么？", conversation_history=history)
 ```
@@ -46,7 +47,7 @@ context = builder.build("用户想了解什么？", conversation_history=history
 result = builder.build_result("用户想了解什么？", conversation_history=history)
 print(result.context)
 print(result.stats.summary())
-# candidates=5 selected=3 tokens=412/2160 utilization=0.19 complexity=0.42 ...
+# candidates=5 selected=3 tokens=412/2908 utilization=0.14 complexity=0.42 ...
 print(result.stats.to_dict())   # 可直接投递给日志平台
 ```
 
@@ -104,7 +105,42 @@ builder = ContextBuilder(
 )
 ```
 
-`create_relevance_scorer("auto")` 会在向量后端不可用时自动降级为关键词重叠。
+`create_relevance_scorer("auto")`（`from hello_agents.context import create_relevance_scorer`）会在向量后端不可用时自动降级为关键词重叠。
+
+### 自定义预算策略
+
+`BudgetPolicy` 是复杂度估计的扩展点（稳定 `name` + `estimate`），缺省策略为
+`HeuristicBudgetPolicy`。下例实现一个复杂度恒为 0.5 的最小策略，并经
+`ContextConfig(budget_policy=…)` 注入：
+
+```python
+from hello_agents.context import BudgetPolicy, ContextBuilder, ContextConfig
+from hello_agents.core import Message
+
+
+class FixedBudgetPolicy(BudgetPolicy):
+    """最小自定义策略：复杂度恒为 0.5"""
+
+    name = "fixed-0.5"
+
+    def estimate(
+        self,
+        query: str,
+        *,
+        history: list[Message],
+        system_instructions: str | None,
+    ) -> float:
+        return 0.5
+
+
+config = ContextConfig(max_tokens=4096, budget_policy=FixedBudgetPolicy())
+builder = ContextBuilder(config)
+result = builder.build_result("用户想了解什么？", conversation_history=[])
+print(result.stats.budget.policy)      # -> "fixed-0.5"
+print(result.stats.budget.complexity)  # -> 0.5
+```
+
+`estimate` 的 `system_instructions` 可忽略，但签名不得收窄（调用方始终以关键字传入）。
 
 ### A/B 测试
 
@@ -129,7 +165,7 @@ print(result.stats.experiment, result.stats.variant)
 
 ### 日志
 
-模块使用标准库 `logging`，logger 名为 `hello_agents.context`：
+模块使用标准库 `logging`，logger 名为 `hello_agents.context.builder` / `.scoring` / `.base`（`hello_agents.context` 为层级父节点，配置它或根 logger 即可一并捕获）：
 
 ```python
 import logging
@@ -137,8 +173,8 @@ import logging
 logging.basicConfig(level=logging.INFO)
 ```
 
-`DEBUG` 输出各阶段明细，`INFO` 输出单行统计摘要（受 `log_stats` 控制），
-`WARNING` 输出检索失败、预算占满与压缩触发。
+`DEBUG` 仅输出时间戳解析兜底提示（各阶段明细暂未落地），`INFO` 输出单行统计摘要（受 `log_stats` 控制），
+`WARNING` 输出检索失败、预算被系统指令占满、压缩触发、配置实验但缺 `session_id`。
 
 ### 示例
 

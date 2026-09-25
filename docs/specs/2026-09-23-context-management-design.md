@@ -38,7 +38,7 @@
 
 ### 1.4 设计原则
 
-- **零外部依赖可运行，配置后自动升级**（对齐 `MemoryConfig` 的既有哲学）：不注入任何工具与向量服务时，`ContextBuilder` 仍可仅凭系统指令、对话历史与自定义信息包工作。
+- **零外部依赖可运行，能力随显式注入扩展**（对齐 `MemoryConfig` 的「零依赖兜底」哲学）：不注入任何工具与向量服务时，`ContextBuilder` 仍可仅凭系统指令、对话历史与自定义信息包工作；检索与向量打分需显式注入对应工具或打分器。
 - **公开 API 向后兼容**：`build()` 的签名与返回类型 `str` 不变，现有调用零改动。
 - **模块边界可独立理解与测试**：每个单元只做一件事，通过明确定义的接口通信。
 
@@ -441,11 +441,11 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
 
 ### 5.6 统计与日志
 
-`BuildStats` 在 `build_result()` 返回前构造完毕。日志经 `logging.getLogger(__name__)`（logger 名 `hello_agents.context`）输出：
+`BuildStats` 在 `build_result()` 返回前构造完毕。日志经各模块内的 `logging.getLogger(__name__)` 输出，实际 logger 名为 `hello_agents.context.builder`、`hello_agents.context.scoring`、`hello_agents.context.base`（`hello_agents.context` 仅为层级父节点，`budget.py` / `cache.py` / `experiment.py` 不产生日志）：
 
 | 级别 | 内容 | 条件 |
 |---|---|---|
-| `DEBUG` | 各阶段明细（候选数、逐包分数、预算数字、缓存命中） | 恒输出 |
+| `DEBUG` | 时间戳解析兜底提示（各阶段明细日志尚未实现） | 恒输出 |
 | `INFO` | `stats.summary()` 单行摘要 | `config.log_stats` 为 `True` |
 | `WARNING` | 检索失败、预算被系统指令占满、压缩触发、配置实验但缺 `session_id` | 恒输出 |
 
@@ -523,7 +523,7 @@ token 精确截断使用 tiktoken：`encoder.decode(encoder.encode(body)[:max_to
    超出本计划范围，记录在案不修。
 3. 无 `DASHSCOPE_API_KEY` 时 `uv run python examples/context_builder_demo.py` 可完整跑通并打印统计摘要。
 4. `builder.build(q, history, sys)` 返回 `str` 且含 `[Task]` 段。
-5. `builder.build_result(q, history, sys).stats` 满足：`candidates_total > 0`、`0 < token_utilization <= 1.0`、`budget.available_tokens == budget.scaled_max_tokens - budget.reserved_tokens`。
+5. `builder.build_result(q, history, sys).stats` 满足：`candidates_total > 0`、`token_utilization > 0`（**不设上界**：`Task`/`Output` 段恒不截断，可能超出预算；上界由压缩契约兜底）、`budget.available_tokens == budget.scaled_max_tokens - budget.reserved_tokens`。
 6. 同一 `session_id` 连续两次 `ExperimentAssigner.assign()` 结果相同。
 7. 缓存二次构建 `cache_hits > 0`。
 

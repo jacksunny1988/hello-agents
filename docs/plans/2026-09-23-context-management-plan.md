@@ -2864,11 +2864,12 @@ def test_build_full_pipeline_has_no_type_error():
 
 
 def test_build_result_stats_are_consistent():
+    # 利用率不设上界（见 Task 16 Step 5 标准 5）：Task/Output 段恒不截断，上界由压缩契约兜底
     builder = ContextBuilder()
     result = builder.build_result("问题", system_instructions="你是助手")
     stats = result.stats
     assert stats.candidates_total > 0
-    assert 0.0 < stats.token_utilization <= 1.0
+    assert 0.0 < stats.token_utilization  # 不设上界，见 Step 5 标准 5
     assert stats.budget.available_tokens == (
         stats.budget.scaled_max_tokens - stats.budget.reserved_tokens
     )
@@ -3749,5 +3750,5 @@ git commit -m "chore: verify context module against acceptance criteria" --allow
 
 1. **`ExperimentSpec` 在构造时即校验白名单字段**（Spec §6 表格把它记在 `ExperimentAssigner.apply`）。构造即校验属 fail-fast，且 `apply` 仍会在 `dataclasses.replace` 抛 `TypeError` 时包装为 `ConfigError`，两条路径都覆盖。
 2. **自定义信息包只计算 `token_count`、不进缓存**（Spec §5.2 第 5 点提到「并缓存」）。P3 的缓存目标是「不变的系统指令与知识库内容」，自定义包通常每次调用都不同，缓存无收益；系统指令包与 embedding 仍照常缓存。
-3. **`logger` 使用 `logging.getLogger(__name__)`**，`base.py` 中实际 logger 名为 `hello_agents.context.base`（Spec §5.6 写作 `hello_agents.context`）。它是 `hello_agents.context` 的子 logger，因此 `logging.getLogger("hello_agents.context")` 仍能捕获全部输出。
+3. **`logger` 使用 `logging.getLogger(__name__)`**，`base.py` 中实际 logger 名为 `hello_agents.context.base`（与 Spec §5.6 一致，Spec 已改为列明三个叶子 logger 名）。它是 `hello_agents.context` 的子 logger，因此 `logging.getLogger("hello_agents.context")` 仍能捕获全部输出。
 

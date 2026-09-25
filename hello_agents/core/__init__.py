@@ -4,7 +4,7 @@
 
 from .agent import Agent
 from .config import Config
-from .exceptions import AgentError, LLMError, ToolError
+from .exceptions import AgentError, ConfigError, LLMError, ToolError
 from .llm import HelloAgentsLLM
 from .message import Message, MessageRole
 
@@ -12,6 +12,7 @@ __all__ = [
     "Agent",
     "AgentError",
     "Config",
+    "ConfigError",
     "HelloAgentsLLM",
     "LLMError",
     "Message",

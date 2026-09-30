@@ -45,7 +45,18 @@ class OpenAICompatModel(ChatModelBase):
         return gen()
 
 
-def build_model(spec: str, stream: bool = False) -> OpenAICompatModel:
+def build_model(
+    spec: str,
+    stream: bool = False,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
+) -> OpenAICompatModel:
     provider, model = parse_spec(spec)
     cfg = get_model_config(provider, model)
-    return OpenAICompatModel(cfg, build_client(cfg), stream=stream)
+    return OpenAICompatModel(
+        cfg,
+        build_client(cfg),
+        stream=stream,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )

@@ -92,7 +92,14 @@ def parse_spec(spec: str) -> tuple[Provider, str | None]:
 
 
 def build_client(cfg: ModelConfig) -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=get_api_key(cfg.provider), base_url=cfg.base_url)
+    # max_retries=0：关掉 SDK 自带的重试（默认 2 次，会重试 408/409/429/5xx，
+    # 且带指数退避）。重试统一交给 ChatModelBase._with_retry——两层叠加会让
+    # 实际请求次数不可预期（最坏 3×3=9 次），重试语义也没法单测。
+    return AsyncOpenAI(
+        api_key=get_api_key(cfg.provider),
+        base_url=cfg.base_url,
+        max_retries=0,
+    )
 
 
 def get_client(spec: str) -> AsyncOpenAI:

@@ -114,7 +114,7 @@ def main() -> None:
             asyncio.run(ask(spec, color))
         except MissingAPIKeyError as exc:
             print(f"== {spec} ==\n  跳过: {exc}")
-        except Exception as exc:  # 一家失败不该挡住另两家
+        except Exception as exc:  # noqa: BLE001 — 一家失败不该挡住另两家
             print(f"== {spec} ==\n  失败: {type(exc).__name__}: {exc}")
         print()
 

@@ -102,9 +102,11 @@ async def part3_retry_exhausted(spec: str) -> None:
             super().__init__(*args, **kwargs)
             self.calls = 0
 
-        async def _call_api(self, messages, stream):
+        async def _call_api(self, messages, stream, tools=None, tool_choice=None):
             self.calls += 1
-            return await super()._call_api(messages, stream)
+            return await super()._call_api(
+                messages, stream, tools=tools, tool_choice=tool_choice
+            )
 
     provider, model = parse_spec(spec)
     cfg = get_model_config(provider, model).model_copy(update={"base_url": UNREACHABLE})

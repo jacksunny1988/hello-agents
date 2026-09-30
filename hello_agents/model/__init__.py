@@ -25,6 +25,7 @@ from ._registry import (
     parse_spec,
 )
 from ._response import ChatResponse, FinishedReason
+from ._tool import Tool, ToolChoice, execute_tool_calls
 from ._usage import ChatUsage
 from .message import (
     Message,
@@ -47,9 +48,12 @@ __all__ = [
     "Role",
     "TextBlock",
     "ThinkingBlock",
+    "Tool",
     "ToolCallBlock",
+    "ToolChoice",
     "ToolResultBlock",
     "build_client",
+    "execute_tool_calls",
     "get_api_key",
     "get_client",
     "get_model_config",

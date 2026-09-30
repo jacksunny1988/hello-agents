@@ -52,7 +52,7 @@ class _FakeModel(ChatModelBase):
     def _get_retryable_exceptions(cls) -> tuple[type[Exception], ...]:
         return (_Boom,)
 
-    async def _call_api(self, messages, stream):
+    async def _call_api(self, messages, stream, tools=None, tool_choice=None):
         self.calls += 1
         outcome = self.outcomes.pop(0) if self.outcomes else ChatResponse(content=[])
         if isinstance(outcome, BaseException):
@@ -63,7 +63,7 @@ class _FakeModel(ChatModelBase):
 class _BlockingModel(_FakeModel):
     """`_call_api` 永远挂起，用来制造一个稳定的取消窗口。"""
 
-    async def _call_api(self, messages, stream):
+    async def _call_api(self, messages, stream, tools=None, tool_choice=None):
         self.calls += 1
         await asyncio.Event().wait()
         return ChatResponse(content=[])
@@ -227,7 +227,7 @@ class _StreamingFake(ChatModelBase):
     def _get_retryable_exceptions(cls) -> tuple[type[Exception], ...]:
         return (_Boom,)
 
-    async def _call_api(self, messages, stream):
+    async def _call_api(self, messages, stream, tools=None, tool_choice=None):
         self.calls += 1
         body = self.script.pop(0) if self.script else []
         if isinstance(body, BaseException):

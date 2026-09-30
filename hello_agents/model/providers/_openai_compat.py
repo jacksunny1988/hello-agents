@@ -1,22 +1,34 @@
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 
 from .._base import ChatModelBase
-from .._formatter import parse_chunk, to_openai_messages
+from .._formatter import parse_chunk, to_openai_messages, to_openai_tools
 from .._registry import build_client, get_model_config, parse_spec
 from .._response import ChatResponse
+from .._tool import Tool, ToolChoice
 from ..message import Message
 
 
 class OpenAICompatModel(ChatModelBase):
     async def _call_api(
-        self, messages: list[Message], stream: bool
+        self,
+        messages: list[Message],
+        stream: bool,
+        tools: Sequence[Tool] | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> ChatResponse | AsyncGenerator[ChatResponse]:
         """三家共用：同一份请求代码，只靠 `self.config` 区分。
 
         非流式返回完整响应；流式返回「增量响应」的异步生成器。
         """
         openai_msgs = to_openai_messages(messages)
+        # 未传就不写这两个 key，让端点用自己的默认值——发一个空的 tools 数组
+        # 是另一种语义（有些端点会因此拒绝请求）。
+        extra: dict = {}
+        if tools:
+            extra["tools"] = to_openai_tools(tools)
+        if tool_choice is not None:
+            extra["tool_choice"] = tool_choice
 
         if not stream:
             t0 = time.perf_counter()
@@ -24,6 +36,7 @@ class OpenAICompatModel(ChatModelBase):
                 model=self.config.model,
                 messages=openai_msgs,
                 stream=False,
+                **extra,
             )
             return ChatResponse.from_completion(completion, time.perf_counter() - t0)
 
@@ -34,6 +47,7 @@ class OpenAICompatModel(ChatModelBase):
             messages=openai_msgs,
             stream=True,
             stream_options={"include_usage": True},
+            **extra,
         )
 
         async def gen() -> AsyncGenerator[ChatResponse]:

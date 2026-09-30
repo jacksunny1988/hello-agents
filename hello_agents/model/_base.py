@@ -3,13 +3,14 @@ import itertools
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
 from openai import AsyncOpenAI
 
 from ._registry import ModelConfig
 from ._response import ChatResponse, FinishedReason
+from ._tool import Tool, ToolChoice
 from .message import Message
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,10 @@ class ChatModelBase(ABC):
         self.retry_delay = retry_delay
 
     async def __call__(
-        self, messages: list[Message]
+        self,
+        messages: list[Message],
+        tools: Sequence[Tool] | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> ChatResponse | AsyncGenerator[ChatResponse]:
         """非流式返回完整 `ChatResponse`；流式返回增量异步生成器。
 
@@ -68,11 +72,19 @@ class ChatModelBase(ABC):
             model = build_model("deepseek:deepseek-flash", stream=True)
             stream = await model(messages)                            # 先 await 拿到流
             async for part in stream: ...
+
+        `tools` / `tool_choice` 只做**透传**：工具协议的解释在 Formatter 与上层，
+        重试、取消、聚合这些收口逻辑与「这次带不带工具」无关，基类不碰它们。
         """
         if not self.stream:
             try:
                 return await self._with_retry(
-                    lambda: self._call_api(messages=messages, stream=False)
+                    lambda: self._call_api(
+                        messages=messages,
+                        stream=False,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    )
                 )
             except asyncio.CancelledError:
                 # 策略 B：吞掉取消，给上层一个可统一处理的收尾对象。
@@ -88,9 +100,14 @@ class ChatModelBase(ABC):
                 return ChatResponse(
                     content=[], finished_reason=FinishedReason.INTERRUPTED
                 )
-        return self._stream(messages)
+        return self._stream(messages, tools, tool_choice)
 
-    async def _stream(self, messages: list[Message]) -> AsyncGenerator[ChatResponse]:
+    async def _stream(
+        self,
+        messages: list[Message],
+        tools: Sequence[Tool] | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> AsyncGenerator[ChatResponse]:
         """流式聚合收口：逐片产出增量，最后产出一个完整响应。
 
         产出约定（消费方据此区分过程与结果）：
@@ -98,8 +115,9 @@ class ChatModelBase(ABC):
         - 前面的每一片都是**增量**（`is_last=False`），正文/思考分别累加；
         - 只有 `content` 非空的片才产出——usage 载体片（`choices=[]`）吸收后跳过，
           不让用户看见空帧；
-        - 最后一片是**完整响应**（`is_last=True`），文本已拼好、usage 已吸收；
-          被取消时它的 `finished_reason` 是 `INTERRUPTED`。
+        - 最后一片是**完整响应**（`is_last=True`），文本已拼好、usage 已吸收，
+          `finished_reason` 来自末片的 `finish_reason`（如 `TOOL_CALLS`）；
+          被取消时是 `INTERRUPTED`。
 
         **重试只覆盖「取到流之前」**：`await self._call_api(..., stream=True)` 这一步
         含建连与状态码检查（SDK 在 `create()` 里就抛非 2xx），失败可以安全重试。
@@ -116,7 +134,6 @@ class ChatModelBase(ABC):
         """
         t0 = time.perf_counter()
         acc = ChatResponse(content=[], is_last=True)
-        reason = FinishedReason.COMPLETED
 
         try:
             # 局部标注用来收窄 `_call_api` 的联合返回类型：这里 stream=True，
@@ -124,7 +141,9 @@ class ChatModelBase(ABC):
             # 要严格推导得给 `_call_api` 加 @overload，但那需要每个子类重复一遍
             # 重载（子类的普通签名会覆盖基类重载），代价远大于收益。
             raw: AsyncGenerator[ChatResponse] = await self._with_retry(
-                lambda: self._call_api(messages=messages, stream=True)
+                lambda: self._call_api(
+                    messages=messages, stream=True, tools=tools, tool_choice=tool_choice
+                )
             )
 
             async for delta in raw:
@@ -141,9 +160,10 @@ class ChatModelBase(ABC):
             current = asyncio.current_task()
             if current is not None:
                 current.uncancel()
-            reason = FinishedReason.INTERRUPTED
+            acc.finished_reason = FinishedReason.INTERRUPTED
 
-        acc.finished_reason = reason
+        # 正常收尾**不覆盖** finished_reason：末片的 finish_reason 已经由累加器
+        # 吸收（TOOL_CALLS 之类），在这里写回 COMPLETED 会把它冲掉。
         if acc.usage is not None:
             # 单帧没有耗时概念（见 parse_chunk），总耗时只能在这里补。
             # 含消费方处理时间，比非流式那个纯 API 耗时略宽——可接受。
@@ -207,5 +227,9 @@ class ChatModelBase(ABC):
 
     @abstractmethod
     async def _call_api(
-        self, messages: list[Message], stream: bool
+        self,
+        messages: list[Message],
+        stream: bool,
+        tools: Sequence[Tool] | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> ChatResponse | AsyncGenerator[ChatResponse]: ...

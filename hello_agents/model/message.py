@@ -27,6 +27,7 @@ class ToolCallBlock(BaseModel):
     name: str
     arguments: str
     id: str
+    index: int | None = None  # 流式对齐用（同一次响应里的第几个调用）；非流式为 None
 
 
 class ToolResultBlock(BaseModel):
@@ -34,6 +35,7 @@ class ToolResultBlock(BaseModel):
     tool_call_id: str
     output: str
     is_error: bool = False
+    name: str | None = None  # 出站 role=tool dict 的 name 字段
 
 
 class Role(StrEnum):

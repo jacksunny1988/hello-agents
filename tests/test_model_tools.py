@@ -373,7 +373,9 @@ class _ScriptedModel(ChatModelBase):
         self.script = list(script)
         self.seen: list[dict] = []
 
-    async def _call_api(self, messages, stream, tools=None, tool_choice=None):
+    async def _call_api(
+        self, messages, stream, tools=None, tool_choice=None, response_format=None
+    ):
         self.seen.append(
             {
                 "messages": messages,

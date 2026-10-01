@@ -16,6 +16,7 @@ class FinishedReason(StrEnum):
     COMPLETED = "completed"
     INTERRUPTED = "interrupted"  # M5 才会真正用到
     TOOL_CALLS = "tool_calls"  # 这轮模型在请求工具，还没给最终答案
+    LENGTH = "length"  # 撞上长度上限被截断（M7 起有消费方：结构化输出的修复提示）
 
 
 class ChatResponse(BaseModel):

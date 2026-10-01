@@ -61,6 +61,7 @@ class ChatModelBase(ABC):
         messages: list[Message],
         tools: Sequence[Tool] | None = None,
         tool_choice: ToolChoice | None = None,
+        response_format: dict | None = None,
     ) -> ChatResponse | AsyncGenerator[ChatResponse]:
         """非流式返回完整 `ChatResponse`；流式返回增量异步生成器。
 
@@ -73,8 +74,9 @@ class ChatModelBase(ABC):
             stream = await model(messages)                            # 先 await 拿到流
             async for part in stream: ...
 
-        `tools` / `tool_choice` 只做**透传**：工具协议的解释在 Formatter 与上层，
-        重试、取消、聚合这些收口逻辑与「这次带不带工具」无关，基类不碰它们。
+        `tools` / `tool_choice` / `response_format` 只做**透传**：工具协议与
+        结构化输出协议的解释在 Formatter 与上层，重试、取消、聚合这些收口逻辑
+        与「这次带不带工具、要不要 JSON」无关，基类不碰它们。
         """
         if not self.stream:
             try:
@@ -84,6 +86,7 @@ class ChatModelBase(ABC):
                         stream=False,
                         tools=tools,
                         tool_choice=tool_choice,
+                        response_format=response_format,
                     )
                 )
             except asyncio.CancelledError:
@@ -100,13 +103,14 @@ class ChatModelBase(ABC):
                 return ChatResponse(
                     content=[], finished_reason=FinishedReason.INTERRUPTED
                 )
-        return self._stream(messages, tools, tool_choice)
+        return self._stream(messages, tools, tool_choice, response_format)
 
     async def _stream(
         self,
         messages: list[Message],
         tools: Sequence[Tool] | None = None,
         tool_choice: ToolChoice | None = None,
+        response_format: dict | None = None,
     ) -> AsyncGenerator[ChatResponse]:
         """流式聚合收口：逐片产出增量，最后产出一个完整响应。
 
@@ -142,7 +146,11 @@ class ChatModelBase(ABC):
             # 重载（子类的普通签名会覆盖基类重载），代价远大于收益。
             raw: AsyncGenerator[ChatResponse] = await self._with_retry(
                 lambda: self._call_api(
-                    messages=messages, stream=True, tools=tools, tool_choice=tool_choice
+                    messages=messages,
+                    stream=True,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    response_format=response_format,
                 )
             )
 
@@ -232,4 +240,5 @@ class ChatModelBase(ABC):
         stream: bool,
         tools: Sequence[Tool] | None = None,
         tool_choice: ToolChoice | None = None,
+        response_format: dict | None = None,
     ) -> ChatResponse | AsyncGenerator[ChatResponse]: ...

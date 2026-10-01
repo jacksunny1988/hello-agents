@@ -102,10 +102,16 @@ async def part3_retry_exhausted(spec: str) -> None:
             super().__init__(*args, **kwargs)
             self.calls = 0
 
-        async def _call_api(self, messages, stream, tools=None, tool_choice=None):
+        async def _call_api(
+            self, messages, stream, tools=None, tool_choice=None, response_format=None
+        ):
             self.calls += 1
             return await super()._call_api(
-                messages, stream, tools=tools, tool_choice=tool_choice
+                messages,
+                stream,
+                tools=tools,
+                tool_choice=tool_choice,
+                response_format=response_format,
             )
 
     provider, model = parse_spec(spec)

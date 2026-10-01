@@ -25,6 +25,16 @@ from ._registry import (
     parse_spec,
 )
 from ._response import ChatResponse, FinishedReason
+from ._structured import (
+    SUBMIT_TOOL_NAME,
+    NativeJsonSchemaUnsupportedError,
+    StructuredAttempt,
+    StructuredMode,
+    StructuredOutputError,
+    StructuredStats,
+    extract_structured,
+    extract_structured_with_stats,
+)
 from ._tool import Tool, ToolChoice, execute_tool_calls
 from ._usage import ChatUsage
 from .message import (
@@ -37,6 +47,7 @@ from .message import (
 )
 
 __all__ = [
+    "SUBMIT_TOOL_NAME",
     "ChatModelBase",
     "ChatResponse",
     "ChatUsage",
@@ -44,8 +55,13 @@ __all__ = [
     "Message",
     "MissingAPIKeyError",
     "ModelConfig",
+    "NativeJsonSchemaUnsupportedError",
     "Provider",
     "Role",
+    "StructuredAttempt",
+    "StructuredMode",
+    "StructuredOutputError",
+    "StructuredStats",
     "TextBlock",
     "ThinkingBlock",
     "Tool",
@@ -54,6 +70,8 @@ __all__ = [
     "ToolResultBlock",
     "build_client",
     "execute_tool_calls",
+    "extract_structured",
+    "extract_structured_with_stats",
     "get_api_key",
     "get_client",
     "get_model_config",

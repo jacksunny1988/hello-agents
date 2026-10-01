@@ -92,6 +92,27 @@ def to_openai_tools(tools: Sequence[Tool]) -> list[dict]:
     return [tool.function_spec() for tool in tools]
 
 
+def to_response_format_json_object() -> dict:
+    """`response_format={"type":"json_object"}`（M7 弱模式）。
+
+    服务端只保证输出能被 `json.loads`，字段名 / 类型 / 缺字段一概不管——
+    约束得靠 prompt 内联 schema，客户端再校验。
+    """
+    return {"type": "json_object"}
+
+
+def to_response_format_json_schema(name: str, schema: dict) -> dict:
+    """`response_format={"type":"json_schema",...}`（M7 严格模式）。
+
+    `schema` 必须是 `_structured.strict_json_schema` 处理过的形状，`strict=True`
+    才有意义。`name` 由调用方清洗（`_structured._schema_name`）。
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "schema": schema, "strict": True},
+    }
+
+
 def _tool_call_dict(tool_call: ToolCallBlock) -> dict:
     return {
         "id": tool_call.id,
@@ -119,12 +140,15 @@ def _as_int(value: object) -> int:
 def _map_finish_reason(raw: object) -> FinishedReason:
     """`finish_reason` 字符串 → `FinishedReason`。
 
-    只认 `tool_calls`；`stop` / `length` / `None` / 未知值都落到 COMPLETED。
-    `length` 的截断语义留到 M7 处理（见设计规格 §8）。
+    认 `tool_calls` 与 `length`（M7 收口 M6 §8 的遗留项：截断的响应在结构化输出里
+    表现为「JSON 解析失败」，不区分开会把模型带偏）；`stop` / `None` / 未知值
+    都落到 COMPLETED。
     """
-    return (
-        FinishedReason.TOOL_CALLS if raw == "tool_calls" else FinishedReason.COMPLETED
-    )
+    if raw == "tool_calls":
+        return FinishedReason.TOOL_CALLS
+    if raw == "length":
+        return FinishedReason.LENGTH
+    return FinishedReason.COMPLETED
 
 
 def from_completion(completion: object, elapsed: float) -> ChatResponse:

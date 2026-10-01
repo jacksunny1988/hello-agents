@@ -27,3 +27,24 @@ async def test_m5_demo_offline_part_survives_call_api_signature_change():
     import model_m5_demo
 
     await model_m5_demo.part3_retry_exhausted("deepseek:deepseek-flash")
+
+
+def test_m7_examples_import_and_their_schemas_are_valid():
+    """M7 两个脚本不在 pytest 收集范围内，至少保证「导入不炸 + schema 立得住」。
+
+    不覆盖发请求的路径（那要 key 和费用）；`model_m7_probe.py` 用
+    `strict_json_schema` 构造请求，所以这里顺带确认那条构造链是通的。
+    """
+    sys.path.insert(0, str(EXAMPLES))
+    import model_m7_demo
+    import model_m7_probe
+
+    from hello_agents.model._structured import strict_json_schema
+
+    schema = strict_json_schema(model_m7_demo.Person)
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["name", "age", "city"]
+
+    probe_format = model_m7_probe._json_schema_format()
+    assert probe_format["json_schema"]["name"] == "person"
+    assert probe_format["json_schema"]["strict"] is True

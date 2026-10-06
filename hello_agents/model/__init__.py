@@ -14,10 +14,12 @@
 """
 
 from ._base import ChatModelBase
+from ._model_card import Capabilities, ModelCard, ModelCardError
 from ._registry import (
     MissingAPIKeyError,
     ModelConfig,
     Provider,
+    UnknownModelError,
     build_client,
     get_api_key,
     get_client,
@@ -48,12 +50,15 @@ from .message import (
 
 __all__ = [
     "SUBMIT_TOOL_NAME",
+    "Capabilities",
     "ChatModelBase",
     "ChatResponse",
     "ChatUsage",
     "FinishedReason",
     "Message",
     "MissingAPIKeyError",
+    "ModelCard",
+    "ModelCardError",
     "ModelConfig",
     "NativeJsonSchemaUnsupportedError",
     "Provider",
@@ -68,6 +73,7 @@ __all__ = [
     "ToolCallBlock",
     "ToolChoice",
     "ToolResultBlock",
+    "UnknownModelError",
     "build_client",
     "execute_tool_calls",
     "extract_structured",

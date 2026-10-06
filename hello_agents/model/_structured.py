@@ -55,7 +55,7 @@ class StructuredOutputError(Exception):
 
 
 class NativeJsonSchemaUnsupportedError(StructuredOutputError):
-    """注册表能力位为 False 时请求 json_schema 模式。
+    """卡片能力位为 False 时请求 json_schema 模式。
 
     继承 `StructuredOutputError`：调用方只关心「结构化没成功」时一个 `except` 就够。
     """
@@ -259,9 +259,10 @@ def _validate_entry(
     if mode == "json_schema" and not model.config.supports_native_json_schema:
         # 决策 3：不静默降级——「以为走了严格模式、其实退化成弱保证」是最坏的结果。
         raise NativeJsonSchemaUnsupportedError(
-            f"provider={model.config.provider.value} 的注册表能力位 "
+            f"provider={model.config.provider.value} 的卡片能力位 "
             f"supports_native_json_schema=False，尚未实测支持原生 strict json_schema。"
-            f'请改用 mode="tool"，或先跑 examples/model_m7_probe.py 实测后回填注册表。'
+            f'请改用 mode="tool"，或先跑 examples/model_m7_probe.py 实测后，'
+            f"把结论写回 hello_agents/model/providers/_models/ 下对应的 YAML 卡片。"
         )
 
 

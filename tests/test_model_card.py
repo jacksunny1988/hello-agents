@@ -202,3 +202,69 @@ def test_get_api_key_missing_names_the_card_env_var(monkeypatch):
     with pytest.raises(MissingAPIKeyError) as exc:
         _registry.get_api_key(Provider.ZHIPU)
     assert "ZHIPU_API_KEY" in str(exc.value)
+
+
+# --- 终审修复 pass 钉住的行为 ---
+
+
+def test_from_yaml_rejects_duplicate_field_in_one_file():
+    """同一个 YAML 里写重了字段（复制粘贴常见）必须报错，不能静默取最后一个。"""
+    with pytest.raises(ModelCardError) as exc:
+        ModelCard.from_yaml(DEEPSEEK_YAML + "context_size: 999\n")
+    assert "context_size" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        DEEPSEEK_YAML.replace("name: deepseek-flash", "name: ''"),
+        DEEPSEEK_YAML.replace("base_url: https://api.deepseek.com", "base_url: ''"),
+        DEEPSEEK_YAML.replace("api_key_env: DEEPSEEK_API_KEY", "api_key_env: ''"),
+    ],
+)
+def test_from_yaml_rejects_empty_required_strings(yaml_text):
+    """空串会让 key 变成 `"deepseek:"`、让缺 key 的消息里出现空变量名——加载期就该拒。"""
+    with pytest.raises(ModelCardError):
+        ModelCard.from_yaml(yaml_text)
+
+
+def test_collect_reports_file_name_on_non_utf8_card():
+    """卡片存成 GBK 之类的非 UTF-8 时，报错仍须点名是哪张卡。"""
+
+    class _BadEncodingResource:
+        name = "gbk.yaml"
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            raise UnicodeDecodeError("utf-8", b"\xd0\xd1", 0, 1, "invalid start byte")
+
+    with pytest.raises(ModelCardError) as exc:
+        _registry._collect([_BadEncodingResource()])
+    assert "gbk.yaml" in str(exc.value)
+
+
+def test_shipped_cards_declare_measured_facts():
+    """随包发布的卡片必须与 M7 实测结论一致——YAML 里写错值要在这里响。
+
+    这是「护栏测试」：它对当前正确的数据立刻通过，价值在于把
+    `native_json_schema` 这个 M7 最关键结论钉死在测试里。
+    """
+    cards = _registry.get_cards()
+    dashscope = cards["dashscope:qwen3.7-plus"]
+    deepseek = cards["deepseek:deepseek-flash"]
+    zhipu = cards["zhipu:glm-5.2"]
+
+    assert dashscope.capabilities.native_json_schema is True
+    assert deepseek.capabilities.native_json_schema is False
+    assert zhipu.capabilities.native_json_schema is False
+
+    assert dashscope.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert deepseek.base_url == "https://api.deepseek.com"
+    assert zhipu.base_url == "https://open.bigmodel.cn/api/paas/v4/"
+
+    assert deepseek.output_size == 384_000
+    assert dashscope.output_size is None
+    assert zhipu.output_size is None
+
+    assert dashscope.api_key_env == "DASHSCOPE_API_KEY"
+    assert deepseek.api_key_env == "DEEPSEEK_API_KEY"
+    assert zhipu.api_key_env == "ZHIPU_API_KEY"

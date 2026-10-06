@@ -117,7 +117,14 @@ def _collect(resources: "Iterable[Traversable]") -> "dict[str, ModelCard]":
         if not resource.name.endswith((".yaml", ".yml")):
             continue
         try:
-            card = ModelCard.from_yaml(resource.read_text(encoding="utf-8"))
+            text = resource.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # 卡片存成了 GBK 之类：必须点名是哪张卡，否则「哪坏了」无从查起。
+            raise ModelCardError(
+                f"卡片 {resource.name} 不是 UTF-8 编码：{exc}"
+            ) from exc
+        try:
+            card = ModelCard.from_yaml(text)
         except ModelCardError as exc:
             raise ModelCardError(f"卡片 {resource.name} 加载失败：{exc}") from exc
         key = f"{card.provider.value}:{card.name}"

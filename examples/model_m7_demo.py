@@ -12,9 +12,9 @@
 `tests/test_model_structured.py`（假模型按脚本返回，确定性）。本 demo 的价值是
 **可观测性**——把三种模式的成功率、修复轮数、token 摆在同一张表里。
 
-`json_schema` 一列按注册表能力位决定跑不跑：能力位为 `False` 时直接跳过，不制造
+`json_schema` 一列按卡片能力位决定跑不跑：能力位为 `False` 时直接跳过，不制造
 一次注定失败的请求（规格 §4.2 的决策 3）。要把能力位变成事实，跑
-`examples/model_m7_probe.py`。
+`examples/model_m7_probe.py`，再把结论写回 `providers/_models/` 下的 YAML 卡片。
 
 需要 .env 里备好对应 provider 的 API key，**会发起真实网络请求并产生费用**。
 

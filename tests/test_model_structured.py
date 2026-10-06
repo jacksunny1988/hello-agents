@@ -756,6 +756,9 @@ async def test_json_schema_mode_requires_the_capability_bit():
         )
 
     assert "supports_native_json_schema" in str(excinfo.value)
+    # M8 后能力位来自卡片 YAML，报错不能再让人去「回填注册表」（那个 Python dict 已删）。
+    assert "回填注册表" not in str(excinfo.value)
+    assert "providers/_models" in str(excinfo.value)
     assert model.seen == []
 
 

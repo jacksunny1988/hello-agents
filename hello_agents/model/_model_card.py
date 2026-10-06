@@ -19,6 +19,26 @@ class ModelCardError(RuntimeError):
     """卡片加载失败：YAML 语法错、字段缺失/类型错、未知 provider、多余字段。"""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """`SafeLoader` + 「同一映射内重复 key 报错」。
+
+    PyYAML 默认对
+        context_size: 1000000
+        context_size: 999
+    这种情况静默取**最后一个**。卡片是配置，复制粘贴写重了必须响——否则
+    「改错了地方」看起来就像「改了没生效」，正是本设计要消灭的静默失效。
+    """
+
+    def construct_mapping(self, node, deep=False):
+        seen: list = []
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise ModelCardError(f"重复的字段 {key!r}")
+            seen.append(key)
+        return super().construct_mapping(node, deep)
+
+
 class Capabilities(BaseModel):
     """模型能力位。
 
@@ -44,12 +64,12 @@ class ModelCard(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Provider
-    name: str
-    base_url: str
+    name: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
     context_size: int = Field(gt=0)
     output_size: int | None = Field(default=None, gt=0)
     capabilities: Capabilities = Capabilities()
-    api_key_env: str
+    api_key_env: str = Field(min_length=1)
 
     @classmethod
     def from_yaml(cls, text: str) -> "ModelCard":
@@ -58,7 +78,7 @@ class ModelCard(BaseModel):
         文件名的补充由调用方（加载器）负责——本方法只拿到文本，不知道出处。
         """
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=_UniqueKeyLoader)
         except yaml.YAMLError as exc:
             raise ModelCardError(f"YAML 语法错误：{exc}") from exc
         try:

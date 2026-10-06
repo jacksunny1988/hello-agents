@@ -82,17 +82,17 @@ class ModelCard(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Provider
-    name: str
-    base_url: str
+    name: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
     context_size: int = Field(gt=0)
     output_size: int | None = Field(default=None, gt=0)
     capabilities: Capabilities = Capabilities()
-    api_key_env: str
+    api_key_env: str = Field(min_length=1)
 
     @classmethod
     def from_yaml(cls, text: str) -> "ModelCard":
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=_UniqueKeyLoader)
         except yaml.YAMLError as exc:
             raise ModelCardError(f"YAML 语法错误：{exc}") from exc
         try:
@@ -115,9 +115,17 @@ class ModelCard(BaseModel):
 
 四个设计点：
 
-1. **解析用 `yaml.safe_load`（pyyaml）**，不用 `yaml.load`：`safe_load` 只构造
-   基本类型，不会因为 YAML 里写了 `!!python/object/...` 就执行任意对象构造。
-   卡片是配置文件、来源可能是别人提的 PR，这个默认值必须安全。
+1. **解析用 `yaml.load(text, Loader=_UniqueKeyLoader)`，而 `_UniqueKeyLoader`
+   继承 `yaml.SafeLoader`**：`SafeLoader` 只构造基本类型，不会因为 YAML 里写了
+   `!!python/object/...` 就执行任意对象构造——卡片是配置文件、来源可能是别人提的
+   PR，这个默认值必须安全。在此之上加一条：**同一映射内的重复 key 报错**。
+   PyYAML 默认对
+   ```yaml
+   context_size: 1000000
+   context_size: 999
+   ```
+   静默取**最后一个**；卡片是配置，复制粘贴写重了必须响，否则「改错了地方」
+   看起来就像「改了没生效」——正是本设计要消灭的静默失效。
    异常分两段包装：`yaml.YAMLError`（语法）与 pydantic `ValidationError`（结构）
    都转成 `ModelCardError`，让调用方只需 catch 一种异常。
 2. **`from_yaml` 接收文本而非路径**。读文件是加载器的职责；卡片只管
@@ -150,7 +158,7 @@ class ModelConfig(BaseModel):
 
 | 异常 | 位置 | 触发时机 | 语义 |
 |---|---|---|---|
-| `ModelCardError(RuntimeError)` | `_model_card.py` | 加载期 | YAML 语法错、字段缺失/类型错/越界、未知 provider、多余字段、重复 key。消息**必须带文件名**。 |
+| `ModelCardError(RuntimeError)` | `_model_card.py` / `_registry.py` | 加载期 | YAML 语法错、字段缺失/类型错/越界/空串、未知 provider、多余字段、同一文件内重复字段、跨文件重复 `provider:name`、文件非 UTF-8。消息**必须带文件名**。 |
 | `UnknownModelError(RuntimeError)` | `_registry.py` | 查询期 | spec 指向的卡片不存在。消息**必须列出所有可用卡片**。 |
 
 两者分开是有意的：一个是「你的配置文件写坏了」（部署/开发期问题），
@@ -211,7 +219,14 @@ def _collect(resources: "Iterable[Traversable]") -> "dict[str, ModelCard]":
         if not resource.name.endswith((".yaml", ".yml")):
             continue
         try:
-            card = ModelCard.from_yaml(resource.read_text(encoding="utf-8"))
+            text = resource.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # 卡片存成了 GBK 之类：必须点名是哪张卡，否则「哪坏了」无从查起。
+            raise ModelCardError(
+                f"卡片 {resource.name} 不是 UTF-8 编码：{exc}"
+            ) from exc
+        try:
+            card = ModelCard.from_yaml(text)
         except ModelCardError as exc:
             raise ModelCardError(f"卡片 {resource.name} 加载失败：{exc}") from exc
         key = f"{card.provider.value}:{card.name}"
@@ -392,6 +407,15 @@ def get_api_key(provider: Provider) -> str:
    `OpenAICompatModel`，差异全在配置里；没有独有能力就没有分化的理由。
 4. **卡片热重载 / 运行时改配置**——YAML 是部署期资产，改完重启即可。
 5. **`default` 标记字段**——当前一 provider 一卡，用不上。
+6. **卡片不可变 / 缓存不可变**——`get_cards()` 返回的是缓存本体，卡片与 dict 都可变；
+   任何调用方一次 `get_card(...).base_url = ...` 或 `get_cards().clear()` 都会污染全进程。
+   当前无调用方这么做，故不做。真要防，应把卡片设为 `frozen=True`——**不要**改成返回
+   浅拷贝，那只会让「改了但别人看不见」更难查。
+7. **一 provider 多卡时的 `api_key_env`**——`get_api_key(provider)` 与
+   `build_client(cfg)` 手里只有 `Provider`，取的是该 provider **默认卡**的 env 名。
+   当前一 provider 一卡，无影响；将来若同一 provider 出现 `api_key_env` 不同的多张卡，
+   需要把 `api_key_env` 带进 `ModelConfig`（或让 `build_client` 接收已选中的卡片），
+   否则会静默读到另一张卡的凭据。
 
 ---
 
@@ -413,6 +437,11 @@ def get_api_key(provider: Provider) -> str:
 | `build_model` 未知模型在建 client 前报错 | `test_build_model_unknown_model_raises_before_touching_credentials` |
 | `get_api_key` 用卡片声明的 env 名 | `test_get_api_key_uses_env_var_declared_by_card` |
 | 缺 key 时消息点名正确 env 变量 | `test_get_api_key_missing_names_the_card_env_var` |
+| 同一 YAML 内重复字段被拒 | `test_from_yaml_rejects_duplicate_field_in_one_file` |
+| 必填字符串为空串被拒（`name` / `base_url` / `api_key_env`） | `test_from_yaml_rejects_empty_required_strings` |
+| 非 UTF-8 卡片报错带文件名 | `test_collect_reports_file_name_on_non_utf8_card` |
+| 随包三张卡片的实测取值（护栏） | `test_shipped_cards_declare_measured_facts` |
+| 能力位报错指向卡片 YAML 而非已删的注册表 | `tests/test_model_structured.py::test_json_schema_mode_requires_the_capability_bit`（扩展断言） |
 
 **回归**：全量 `.venv/Scripts/python.exe -m pytest -q` 必须回到
 「**561 + N passed / 1 failed / 9 skipped**」，唯一失败仍是

@@ -141,3 +141,43 @@ def test_get_cards_loads_only_once(monkeypatch):
         assert len(calls) == 1
     finally:
         _registry.get_cards.cache_clear()
+
+
+from hello_agents.model import MissingAPIKeyError, get_model_config
+from hello_agents.model._registry import UnknownModelError
+from hello_agents.model.providers import build_model
+
+
+def test_get_model_config_defaults_to_provider_card():
+    cfg = get_model_config(Provider.DEEPSEEK)
+    assert cfg.model == "deepseek-flash"
+    assert cfg.base_url == "https://api.deepseek.com"
+    assert cfg.output_size == 384_000
+
+
+def test_get_model_config_unknown_model_lists_available_cards():
+    with pytest.raises(UnknownModelError) as exc:
+        get_model_config(Provider.DEEPSEEK, "no-such-model")
+    msg = str(exc.value)
+    assert "deepseek:no-such-model" in msg
+    assert "deepseek:deepseek-flash" in msg
+
+
+def test_build_model_unknown_model_raises_before_touching_credentials():
+    """未知模型必须在读环境变量/建 client 之前就报错。"""
+    with pytest.raises(UnknownModelError):
+        build_model("zhipu:no-such-model")
+
+
+def test_get_api_key_uses_env_var_declared_by_card(monkeypatch):
+    monkeypatch.setattr(_registry, "load_dotenv", lambda: None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-card")
+    assert _registry.get_api_key(Provider.DEEPSEEK) == "sk-from-card"
+
+
+def test_get_api_key_missing_names_the_card_env_var(monkeypatch):
+    monkeypatch.setattr(_registry, "load_dotenv", lambda: None)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    with pytest.raises(MissingAPIKeyError) as exc:
+        _registry.get_api_key(Provider.ZHIPU)
+    assert "ZHIPU_API_KEY" in str(exc.value)

@@ -33,59 +33,47 @@ class ModelConfig(BaseModel):
     supports_native_json_schema: bool = False
 
 
-# `supports_native_json_schema` 三处取值均为 2026-10-01 用
-# `examples/model_m7_probe.py` 实测所得（M2 的保守 False 到 M7 变成事实）。
-# 判定口径：端点接受参数**且**返回合法 JSON 才算 True；「接受但不遵守」算 False。
-REGISTRY: dict[Provider, ModelConfig] = {
-    # 详细参考https://bailian.console.aliyun.com/cn-beijing/model/market/detail/qwen3.7-plus
-    Provider.DASHSCOPE: ModelConfig(
-        provider=Provider.DASHSCOPE,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model="qwen3.7-plus",
-        context_size=1_000_000,
-        supports_thinking=True,
-        # 实测：strict json_schema 请求返回合法 JSON，字段全对。
-        supports_native_json_schema=True,
-    ),
-    # 详细信息参考：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
-    Provider.DEEPSEEK: ModelConfig(
-        provider=Provider.DEEPSEEK,
-        base_url="https://api.deepseek.com",
-        model="deepseek-flash",
-        context_size=1_000_000,
-        supports_thinking=True,
-        # 实测：端点直接回 400 "This response_format type is unavailable now"。
-        # json_object 可用（但 prompt 里必须出现 json 一词，否则同样 400）。
-        supports_native_json_schema=False,
-    ),
-    # 详细信息参考：https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
-    Provider.ZHIPU: ModelConfig(
-        provider=Provider.ZHIPU,
-        base_url="https://open.bigmodel.cn/api/paas/v4/",
-        model="glm-5.2",
-        context_size=1_000_000,
-        supports_thinking=True,
-        # 实测：**失败方式很坑**——端点不报错，静默忽略 response_format，
-        # 返回的还是散文。能力位按「是否真的约束了输出」判定，所以是 False。
-        # 哪天它开始真遵守，重跑 model_m7_probe.py 再改。
-        supports_native_json_schema=False,
-    ),
-}
-
-_ENV_VAR: dict[Provider, str] = {
-    Provider.DASHSCOPE: "DASHSCOPE_API_KEY",
-    Provider.DEEPSEEK: "DEEPSEEK_API_KEY",
-    Provider.ZHIPU: "ZHIPU_API_KEY",
-}
+# 模型事实（base_url / context_size / 能力位 / 凭据环境变量名）不在这里硬编码，
+# 而在 `providers/_models/*.yaml` 的卡片里声明——见本模块的 `get_cards`。
+# 原先那个 `REGISTRY` 字典（以及 `_ENV_VAR`）已删除，实测结论的注释随字段
+# 搬进了对应 YAML。
 
 
 class MissingAPIKeyError(RuntimeError):
     """环境变量里没有该 provider 的 API key。"""
 
 
+class UnknownModelError(RuntimeError):
+    """spec 指向的卡片不存在（`get_cards()` 里没有这个 key）。"""
+
+
+def get_card(provider: Provider, model: str | None = None) -> "ModelCard":
+    """取卡片：给了 `model` 就精确查 `provider:name`，否则取该 provider 的卡。
+
+    目前一 provider 一卡；万一将来同名多卡，按 name 排序取第一张，保证结果确定。
+    """
+    cards = get_cards()
+    if model is not None:
+        key = f"{provider.value}:{model}"
+        if key not in cards:
+            available = "、".join(sorted(cards)) or "（无）"
+            raise UnknownModelError(f"没有模型卡片 {key!r}；可用：{available}")
+        return cards[key]
+
+    matches = sorted(
+        (c for c in cards.values() if c.provider == provider), key=lambda c: c.name
+    )
+    if not matches:
+        available = "、".join(sorted(cards)) or "（无）"
+        raise UnknownModelError(
+            f"provider {provider.value!r} 没有模型卡片；可用：{available}"
+        )
+    return matches[0]
+
+
 def get_api_key(provider: Provider) -> str:
     load_dotenv()
-    var = _ENV_VAR[provider]
+    var = get_card(provider).api_key_env
     key = os.environ.get(var)
     if not key:
         raise MissingAPIKeyError(
@@ -97,8 +85,7 @@ def get_api_key(provider: Provider) -> str:
 def get_model_config(
     provider: Provider = Provider.DEEPSEEK, model: str | None = None
 ) -> ModelConfig:
-    cfg = REGISTRY[provider]
-    return cfg if model is None else cfg.model_copy(update={"model": model})
+    return get_card(provider, model).to_config()
 
 
 def parse_spec(spec: str) -> tuple[Provider, str | None]:

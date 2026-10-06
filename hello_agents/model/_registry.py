@@ -17,6 +17,7 @@ class ModelConfig(BaseModel):
     base_url: str
     model: str
     context_size: int
+    output_size: int | None = None  # 最大输出 token；卡片未实测声明时为 None
     supports_thinking: bool = False
     supports_tool_calls: bool = True
     supports_native_json_schema: bool = False

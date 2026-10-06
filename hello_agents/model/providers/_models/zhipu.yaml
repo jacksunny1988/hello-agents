@@ -1,0 +1,19 @@
+# 智谱 GLM 的 OpenAI 兼容端点。参考：
+# https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+provider: zhipu
+name: glm-5.2
+base_url: https://open.bigmodel.cn/api/paas/v4/
+
+context_size: 1000000
+# output_size（最大输出 token）尚无实测值，故不声明 —— 卡片里为 None。
+
+capabilities:
+  thinking: true
+  tool_calls: true
+  # 实测（2026-10-01）：**失败方式很坑**——端点不报错，静默忽略 response_format，
+  # 返回的还是散文。能力位按「是否真的约束了输出」判定，所以是 false。
+  # 哪天它开始真遵守，重跑 examples/model_m7_probe.py 再改。
+  native_json_schema: false
+
+# 凭据：只写环境变量名，绝不写 key 本体
+api_key_env: ZHIPU_API_KEY

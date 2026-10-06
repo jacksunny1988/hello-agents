@@ -1,0 +1,19 @@
+# DeepSeek 官方 OpenAI 兼容端点。规格参考：
+# https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+provider: deepseek
+name: deepseek-flash
+base_url: https://api.deepseek.com
+
+context_size: 1000000
+output_size: 384000        # 最大输出 token
+
+capabilities:
+  thinking: true
+  tool_calls: true
+  # 实测（2026-10-01，examples/model_m7_probe.py）：端点直接回 400
+  # "This response_format type is unavailable now"。json_object 可用，
+  # 但 prompt 里必须出现 json 一词，否则同样 400。
+  native_json_schema: false
+
+# 凭据：只写环境变量名，绝不写 key 本体
+api_key_env: DEEPSEEK_API_KEY

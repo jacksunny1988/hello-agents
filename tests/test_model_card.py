@@ -73,3 +73,71 @@ def test_card_rejects_extra_fields():
     """多写字段（典型是误把 key 本体写进 YAML）必须在加载期被拒。"""
     with pytest.raises(ModelCardError):
         ModelCard.from_yaml(DEEPSEEK_YAML + "api_key: sk-should-not-be-here\n")
+
+
+from hello_agents.model import _registry
+
+
+class _FakeResource:
+    """替身：只实现 `_collect` 用到的 `.name` 与 `.read_text()`。"""
+
+    def __init__(self, name: str, text: str) -> None:
+        self.name = name
+        self._text = text
+
+    def read_text(self, encoding: str = "utf-8") -> str:
+        return self._text
+
+
+def test_collect_skips_non_yaml_and_keys_by_provider_name():
+    cards = _registry._collect(
+        [
+            _FakeResource("__init__.py", ""),
+            _FakeResource("deepseek.yaml", DEEPSEEK_YAML),
+        ]
+    )
+    assert set(cards) == {"deepseek:deepseek-flash"}
+    assert cards["deepseek:deepseek-flash"].context_size == 1_000_000
+
+
+def test_collect_reports_file_name_on_bad_card():
+    with pytest.raises(ModelCardError) as exc:
+        _registry._collect([_FakeResource("broken.yaml", "provider: nope\n")])
+    assert "broken.yaml" in str(exc.value)
+
+
+def test_collect_rejects_duplicate_key():
+    with pytest.raises(ModelCardError) as exc:
+        _registry._collect(
+            [
+                _FakeResource("deepseek.yaml", DEEPSEEK_YAML),
+                _FakeResource("deepseek-copy.yaml", DEEPSEEK_YAML),
+            ]
+        )
+    assert "deepseek:deepseek-flash" in str(exc.value)
+
+
+def test_get_cards_discovers_all_shipped_cards():
+    cards = _registry.get_cards()
+    assert set(cards) == {
+        "dashscope:qwen3.7-plus",
+        "deepseek:deepseek-flash",
+        "zhipu:glm-5.2",
+    }
+
+
+def test_get_cards_loads_only_once(monkeypatch):
+    calls = []
+
+    def fake_load():
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(_registry, "_load_cards", fake_load)
+    _registry.get_cards.cache_clear()
+    try:
+        _registry.get_cards()
+        _registry.get_cards()
+        assert len(calls) == 1
+    finally:
+        _registry.get_cards.cache_clear()

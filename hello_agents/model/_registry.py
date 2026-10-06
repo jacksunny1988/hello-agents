@@ -1,9 +1,19 @@
 import os
 from enum import StrEnum
+from functools import lru_cache
+from importlib.resources import files
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from importlib.resources.abc import Traversable
+
+    from ._model_card import ModelCard
 
 
 class Provider(StrEnum):
@@ -99,6 +109,54 @@ def parse_spec(spec: str) -> tuple[Provider, str | None]:
         valid = "、".join(p.value for p in Provider)
         raise ValueError(f"未知 provider {name.strip()!r}，可选：{valid}") from None
     return provider, model.strip() or None
+
+
+def _collect(resources: "Iterable[Traversable]") -> "dict[str, ModelCard]":
+    """把一组包内资源收成 `"provider:name" → ModelCard`。
+
+    抽成纯函数（而不是直接写在 `_load_cards` 里）是为了能离线单测：喂几个
+    带 `.name` / `.read_text()` 的替身就能覆盖「过滤非 YAML」「报错带文件名」
+    「重复 key」三种情形，不用碰真实包目录。
+
+    `_model_card` 只能在函数内延迟导入：它顶层要 `from ._registry import
+    ModelConfig, Provider`，而本模块又要用 `ModelCard`。若在**顶层**导入，
+    「先 `import hello_agents.model._model_card`」这条路径会拿到一个只执行到
+    一半的 `_registry`（`ModelCard` 尚未定义）→ ImportError。放进函数体后，
+    调用时本模块早已执行完毕，环彻底断开。
+    """
+    from ._model_card import ModelCard, ModelCardError
+
+    cards: dict[str, ModelCard] = {}
+    for resource in resources:
+        if not resource.name.endswith((".yaml", ".yml")):
+            continue
+        try:
+            card = ModelCard.from_yaml(resource.read_text(encoding="utf-8"))
+        except ModelCardError as exc:
+            raise ModelCardError(f"卡片 {resource.name} 加载失败：{exc}") from exc
+        key = f"{card.provider.value}:{card.name}"
+        if key in cards:
+            # 静默覆盖会让「改错文件」看起来像没生效，宁可加载期就炸。
+            raise ModelCardError(f"重复的卡片 key {key!r}（来自 {resource.name}）")
+        cards[key] = card
+    return cards
+
+
+def _load_cards() -> "dict[str, ModelCard]":
+    """扫描包内 `_models/*.yaml`（每次都真扫；缓存由 `get_cards` 负责）。"""
+    pkg = files("hello_agents.model.providers._models")
+    # 排序只为让加载顺序确定（进而让「取该 provider 的第一张卡」有确定结果）。
+    return _collect(sorted(pkg.iterdir(), key=lambda r: r.name))
+
+
+@lru_cache(maxsize=1)
+def get_cards() -> "dict[str, ModelCard]":
+    """包内 `_models/*.yaml` 的注册表，key 为 `"provider:name"`。
+
+    `lru_cache` 保证整个进程只扫描一次包资源；测试要重置用
+    `get_cards.cache_clear()`。
+    """
+    return _load_cards()
 
 
 def build_client(cfg: ModelConfig) -> AsyncOpenAI:

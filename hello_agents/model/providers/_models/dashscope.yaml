@@ -1,0 +1,17 @@
+# 阿里云百炼 DashScope 的 OpenAI 兼容端点。参考：
+# https://bailian.console.aliyun.com/cn-beijing/model/market/detail/qwen3.7-plus
+provider: dashscope
+name: qwen3.7-plus
+base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+context_size: 1000000
+# output_size（最大输出 token）尚无实测值，故不声明 —— 卡片里为 None。
+
+capabilities:
+  thinking: true
+  tool_calls: true
+  # 实测（2026-10-01）：strict json_schema 请求返回合法 JSON，字段全对。
+  native_json_schema: true
+
+# 凭据：只写环境变量名，绝不写 key 本体
+api_key_env: DASHSCOPE_API_KEY

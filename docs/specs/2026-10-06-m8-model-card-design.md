@@ -378,6 +378,9 @@ def get_api_key(provider: Provider) -> str:
 - `hello_agents/model/_model_card.py`
 - `hello_agents/model/providers/_models/__init__.py`
 - `tests/test_model_card.py`
+- `examples/model_m8_demo.py`——**离线** demo（不发请求、不需要 API key）：
+  卡片事实表 / 加一个模型=加一个 YAML / 坏卡片加载期报错 / 未知模型列可用卡片。
+  M8 的产物是配置层，行为不依赖网络，所以这个 demo 能零成本跑
 
 **修改**
 - `hello_agents/model/_registry.py`——删两个字典、加加载器与 `get_card`、改写两个查询函数
@@ -442,6 +445,7 @@ def get_api_key(provider: Provider) -> str:
 | 非 UTF-8 卡片报错带文件名 | `test_collect_reports_file_name_on_non_utf8_card` |
 | 随包三张卡片的实测取值（护栏） | `test_shipped_cards_declare_measured_facts` |
 | 能力位报错指向卡片 YAML 而非已删的注册表 | `tests/test_model_structured.py::test_json_schema_mode_requires_the_capability_bit`（扩展断言） |
+| demo 全程离线可跑且输出含三张卡片 / 文件名报错 / 可用卡片列表 | `tests/test_model_examples.py::test_m8_demo_runs_offline_and_shows_the_declarative_registry` |
 
 **回归**：全量 `.venv/Scripts/python.exe -m pytest -q` 必须回到
 「**561 + N passed / 1 failed / 9 skipped**」，唯一失败仍是

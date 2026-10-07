@@ -48,3 +48,26 @@ def test_m7_examples_import_and_their_schemas_are_valid():
     probe_format = model_m7_probe._json_schema_format()
     assert probe_format["json_schema"]["name"] == "person"
     assert probe_format["json_schema"]["strict"] is True
+
+
+def test_m8_demo_runs_offline_and_shows_the_declarative_registry(capsys):
+    """m8 demo 全程离线（不发请求、不需要 key），所以可以整段跑并断言输出。
+
+    M8 的产物是**配置层**，它的行为（加载 / 校验 / 查表 / 报错）不依赖网络——
+    这正是这个 demo 不需要 API key 的原因。
+    """
+    sys.path.insert(0, str(EXAMPLES))
+    import model_m8_demo
+
+    model_m8_demo.main()
+
+    out = capsys.readouterr().out
+    # 三张随包发布的卡片都列出来了
+    assert "deepseek:deepseek-flash" in out
+    assert "dashscope:qwen3.7-plus" in out
+    assert "zhipu:glm-5.2" in out
+    # 坏卡片报错带文件名
+    assert "my-card.yaml" in out
+    # 未知模型报出可用卡片
+    assert "no-such-model" in out
+    assert "ALL PARTS DONE" in out

@@ -78,6 +78,25 @@ async def test_registered_function_is_callable_through_call_tool():
     assert resp.get_text() == "3"
 
 
+async def test_call_tool_accepts_parameter_named_name():
+    # 工具形参恰好叫 name 时，不得与 call_tool 的 name 形参冲突
+    # （name 必须是 positional-only，否则 kwargs 会重复绑定 name）
+    toolkit = Toolkit(approver=AutoApprover(True))
+
+    def greet(name: str) -> str:
+        """打招呼。
+
+        Args:
+            name: 名字。
+        """
+        return f"hi {name}"
+
+    toolkit.register_function(greet)
+    resp = await toolkit.call_tool("greet", name="world")
+    assert resp.status is ToolStatus.SUCCESS
+    assert resp.get_text() == "hi world"
+
+
 def test_duplicate_registration_raises_value_error():
     toolkit = Toolkit(tools=[EchoTool()])
     with pytest.raises(ValueError, match="echo"):

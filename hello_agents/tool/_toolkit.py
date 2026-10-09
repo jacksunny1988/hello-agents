@@ -81,7 +81,11 @@ class Toolkit:
                 groups.append(record.group)
         return groups
 
-    async def call_tool(self, name: str, **kwargs: Any) -> ToolResponse:
-        """按名调用工具；执行收口（线程池/超时/异常）由 T2 的 __call__ 负责。"""
+    async def call_tool(self, name: str, /, **kwargs: Any) -> ToolResponse:
+        """按名调用工具；执行收口（线程池/超时/异常）由 T2 的 __call__ 负责。
+
+        `name` 是 positional-only：`**kwargs` 是工具自身的入参命名空间，
+        工具形参完全可以叫 `name`，若把工具名也放进该命名空间就会重复绑定。
+        """
         tool = self.get_tool(name)
         return await run_governed(self, tool, kwargs)

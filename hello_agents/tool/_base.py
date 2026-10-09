@@ -20,6 +20,10 @@ class ToolBase(ABC):
     is_concurrency_safe: ClassVar[bool] = True
     timeout: ClassVar[float | None] = None
 
+    requires_confirmation: ClassVar[bool | None] = None
+    max_retries: ClassVar[int] = 0
+    retry_backoff: ClassVar[float] = 0.1
+
     def __init__(self) -> None:
         self._validate_input_schema()
 

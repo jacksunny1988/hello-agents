@@ -9,3 +9,8 @@ servers:
     transport: stdio
     command: npx
     args: [-y, "@modelcontextprotocol/server-everything"]
+
+  # 本地 HTTP server：先 `uv run python tests/_mcp_http_server.py 8765` 再连
+  local_http:
+    transport: http
+    url: http://127.0.0.1:8765/mcp

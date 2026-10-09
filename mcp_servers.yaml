@@ -1,0 +1,11 @@
+# MCP server 声明（stdio 传输）。
+# 用法：load_mcp_config("mcp_servers.yaml") → {name: StdioServerConfig}
+#
+# 注意：首次运行会把 server 下载到本地缓存，需要联网。
+# everything 是 MCP 官方的参考 server（带 echo 等测试工具），只有 npm 包，
+# 所以这里用 npx 起；uvx 那套 Python server 里没有同名等价物。
+servers:
+  everything:
+    transport: stdio
+    command: npx
+    args: [-y, "@modelcontextprotocol/server-everything"]

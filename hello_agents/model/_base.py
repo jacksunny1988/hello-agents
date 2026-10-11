@@ -58,6 +58,17 @@ class ChatModelBase(ABC):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
+    @property
+    def context_size(self) -> int:
+        """该模型的上下文窗口大小（token）。
+
+        `state` 的压缩阈值 = `trigger_ratio × context_size`；与 AgentScope
+        同名同义（那边是 `ModelCard.context_size`）。暴露成属性而非让上层翻
+        `self.config`，是因为「窗口多大」是模型层的公开事实，而 `ModelConfig`
+        的字段表属于 registry 的内部形状。
+        """
+        return self.config.context_size
+
     async def __call__(
         self,
         messages: list[Message],

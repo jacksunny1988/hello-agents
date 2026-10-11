@@ -103,8 +103,8 @@ tests/test_state_*.py 测试
 | **C0** | 动手 ✅ | 包骨架 + `AgentState` | `state/_state.py`、`__init__.py`、tests | `03-milestone-c0-state.md`（已交付 · 已过审） |
 | **C1** | 动手 ✅ | 上下文组装 | 模块级 `build_model_input()`（三段式 + tools）+ `AgentState` 工具结果规则修订 | `04-milestone-c1-build-input.md`（已交付 · 已过审 · 含 R4 补丁） |
 | **C2** | 动手 ⏳ | token 估算 | **改造 `model/`**（我动手）：`count_tokens` 粗估 + 可覆写 | `05-milestone-c2-count-tokens.md`（已交付 · 待 review） |
-| **C3** | 动手 | 压缩入口与配置 | `ContextConfig` + `needs_compression` / `compress` 骨架与短路 | `06-milestone-c3-...` |
-| **C4** | 动手 | 切分算法 | `_split.py`：保留预算回扫 + 边界消息按 block 切 + 不切断 tool_call/tool_result 配对 | `07-milestone-c4-...` |
+| **C3** | 动手 📐 | 压缩入口与配置 | `ContextConfig`（两条 ratio）+ **首次引入 `ContextManager`** + `estimated_tokens` / `needs_compression` / `compress` 的判定与守卫 | `06-milestone-c3-compress-entry.md`（已交付 · 待实现） |
+| **C4** | 动手 | 切分算法 | `_split.py`：保留预算回扫 + 边界消息按 block 切 + 不切断 tool_call/tool_result 配对 | `07-milestone-c4-split.md` |
 | **C5** | 动手 | 结构化摘要 | 5 字段 `SummarySchema` + 复用 model 结构化输出 + 模板拼装 | `08-milestone-c5-...` |
 | **C6** | 动手 | 回填与异常路径 | 状态替换 + reserve 过大 / 输入超长 / 中断保护 | `09-milestone-c6-...` |
 | **C7** | 动手 | 端到端整合 | examples 跑通「压爆 → 压缩 → 继续」+ 复盘 | `10-milestone-c7-...` |

@@ -7,14 +7,27 @@
 （examples 主循环，或未来的 Agent 类）。
 
 典型用法：
-    from hello_agents.state import AgentState
+    from hello_agents.state import AgentState, ContextConfig, ContextManager
 
-    state = AgentState()
-    state.append_blocks("assistant", [TextBlock(text="你好")])
-    print(state.summary, len(state.context))
+    cm = ContextManager(model, config=ContextConfig(trigger_ratio=0.8))
+    if await cm.needs_compression(state, system_prompt=sp):
+        await cm.compress(state, system_prompt=sp)
 """
 
-from ._context import ModelInput, build_model_input
+from ._config import ContextConfig
+from ._context import (
+    ContextManager,
+    ContextOverflowError,
+    ModelInput,
+    build_model_input,
+)
 from ._state import AgentState
 
-__all__ = ["AgentState", "ModelInput", "build_model_input"]
+__all__ = [
+    "AgentState",
+    "ContextConfig",
+    "ContextManager",
+    "ContextOverflowError",
+    "ModelInput",
+    "build_model_input",
+]

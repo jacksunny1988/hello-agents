@@ -98,16 +98,16 @@ tests/test_state_*.py 测试
 | 任务 | 类型 | 主题 | 关键产物 | 文档 |
 |---|---|---|---|---|
 | **L1** | 只读 ✅ | 全貌与数据模型 | 讲解文档（已交付） | `01-agentscope-context-anatomy.md` |
-| **L2** | 只读 | 压缩机制讲透 | 触发条件 / 切分算法 / 结构化摘要 / 回填 / 三条异常路径 | `02-agentscope-compression.md` |
-| **L3** | 只读 | 设计决策与横向对比 | 与滑动窗口、RAG 长期记忆、Claude Code 式压缩、MemGPT 式的取舍 | `03-design-comparison.md`（后置，编号顺延） |
-| **C0** | 动手 | 包骨架 + `AgentState` | `state/_state.py`、`__init__.py`、tests | `03-milestone-c0-state.md`（已交付） |
-| **C1** | 动手 | 上下文组装 | 模块级 `build_model_input()`（三段式 + tools）+ `AgentState` 工具结果规则修订 | `04-milestone-c1-build-input.md`（已交付） |
-| **C2** | 动手 | token 估算 | **改造 `model/`**：`count_tokens` 粗估 + 可覆写 | `06-milestone-c2-...` |
-| **C3** | 动手 | 压缩入口与配置 | `ContextConfig` + `needs_compression` / `compress` 骨架与短路 | `07-milestone-c3-...` |
-| **C4** | 动手 | 切分算法 | `_split.py`：保留预算回扫 + 边界消息按 block 切 + 不切断 tool_call/tool_result 配对 | `08-milestone-c4-...` |
-| **C5** | 动手 | 结构化摘要 | 5 字段 `SummarySchema` + 复用 model 结构化输出 + 模板拼装 | `09-milestone-c5-...` |
-| **C6** | 动手 | 回填与异常路径 | 状态替换 + reserve 过大 / 输入超长 / 中断保护 | `10-milestone-c6-...` |
-| **C7** | 动手 | 端到端整合 | examples 跑通「压爆 → 压缩 → 继续」+ 复盘 | `11-milestone-c7-...` |
+| **L2** | 只读 ✅ | 压缩机制讲透 | 触发条件 / 切分算法 / 结构化摘要 / 回填 / 三条异常路径 | `02-agentscope-compression.md` |
+| **L3** | 只读 | 设计决策与横向对比 | 与滑动窗口、RAG 长期记忆、Claude Code 式压缩、MemGPT 式的取舍 | 编号顺延（交付时取下一个空闲号） |
+| **C0** | 动手 ✅ | 包骨架 + `AgentState` | `state/_state.py`、`__init__.py`、tests | `03-milestone-c0-state.md`（已交付 · 已过审） |
+| **C1** | 动手 ✅ | 上下文组装 | 模块级 `build_model_input()`（三段式 + tools）+ `AgentState` 工具结果规则修订 | `04-milestone-c1-build-input.md`（已交付 · 已过审 · 含 R4 补丁） |
+| **C2** | 动手 ⏳ | token 估算 | **改造 `model/`**（我动手）：`count_tokens` 粗估 + 可覆写 | `05-milestone-c2-count-tokens.md`（已交付 · 待 review） |
+| **C3** | 动手 | 压缩入口与配置 | `ContextConfig` + `needs_compression` / `compress` 骨架与短路 | `06-milestone-c3-...` |
+| **C4** | 动手 | 切分算法 | `_split.py`：保留预算回扫 + 边界消息按 block 切 + 不切断 tool_call/tool_result 配对 | `07-milestone-c4-...` |
+| **C5** | 动手 | 结构化摘要 | 5 字段 `SummarySchema` + 复用 model 结构化输出 + 模板拼装 | `08-milestone-c5-...` |
+| **C6** | 动手 | 回填与异常路径 | 状态替换 + reserve 过大 / 输入超长 / 中断保护 | `09-milestone-c6-...` |
+| **C7** | 动手 | 端到端整合 | examples 跑通「压爆 → 压缩 → 继续」+ 复盘 | `10-milestone-c7-...` |
 
 **C2 的分工特例**：按上一轮约定，`model/` 的改造由**我动手**，其余（`state/` 包、examples、tests）由你亲手写。
 

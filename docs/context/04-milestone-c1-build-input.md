@@ -55,6 +55,51 @@ if tool_results:
 
 > 这三处改完，C0 的其余 9 个测试应保持全绿。
 
+### 修订 R4（交付后补丁，2026-10-10）：`tools` 的类型是 `Sequence[Tool] | None`，不是 `list[dict]`
+
+C1 原文把 `ModelInput` / `build_model_input` 的 `tools` 标成了 `list[dict]`——**这是我图纸的疏漏，不是你的实现问题**。
+
+`model` 层的真实契约（`hello_agents/model/_base.py` 的 `__call__` / `count_tokens`，以及 `_formatter.to_openai_tools`）
+收的是 **`Sequence[Tool] | None`**，即 `hello_agents.model.Tool` **对象**：
+
+```python
+# hello_agents/model/_formatter.py:90-92
+def to_openai_tools(tools: Sequence[Tool]) -> list[dict]:
+    """产出 `chat.completions.create(tools=...)` 要的列表。"""
+    return [tool.function_spec() for tool in tools]
+```
+
+真实的调用链是 `bridge.model_tools_for(toolkit)` → `list[ToolkitModelTool]`，而 `ToolkitModelTool` 继承 `model.Tool`、
+自带 `function_spec()`。**若按原文类型传 `list[dict]`，会在 `tool.function_spec()` 上 `AttributeError`**——
+而且崩在模型调用最深处，排查成本最高。
+
+**决定**：`ModelInput.tools` 与 `build_model_input(..., tools=...)` 一律写 `Sequence[Tool] | None`。
+`TypedDict` 的注解运行时不校验，所以这是一个**只存在于类型层**的 bug；但契约文档必须准，
+否则 C3/C4 的 `count_tokens(**out)` 一旦接上类型检查（mypy）就会炸。
+
+**你只需改 `hello_agents/state/_context.py` 的这几行**：
+
+```diff
+-from typing import TypedDict
++from collections.abc import Sequence
++from typing import TypedDict
+ 
+-from ..model import Message
++from ..model import Message, Tool
+@@ class ModelInput(TypedDict):
+     messages: list[Message]
+-    tools: list[dict] | None
++    tools: Sequence[Tool] | None
+@@ def build_model_input(
+     *,
+     system_prompt: str,
+-    tools: list[dict] | None = None,
++    tools: Sequence[Tool] | None = None,
+ ) -> ModelInput:
+```
+
+> 运行时行为**完全不变**（`tools` 本来就是原样透传），改完 `pytest tests/test_state_c1.py -q` 应仍全绿。
+
 ---
 
 ## C1.1 设计原理（先理解）
@@ -200,17 +245,18 @@ AgentScope 的 `_prepare_model_input` 是 `async`，唯一原因是它内部要 
 |---|---|---|
 | `state` | `AgentState` | **只读**；函数不改它 |
 | `system_prompt` | `str` | 最终系统提示文本（动态拼装由调用方负责） |
-| `tools` | `list[dict] \| None` | 工具 JSON schema；**无工具传 `None`，不要传 `[]`**（空数组在部分端点语义不同，见你 M6 结论） |
-| 返回 | `ModelInput` | `{"messages": list[Message], "tools": list[dict] \| None}`，可直接 `**` 展开 |
+| `tools` | `Sequence[Tool] \| None` | `hello_agents.model.Tool` 对象序列（见 §C1.0 R4）；**无工具传 `None`，不要传 `[]`**（空数组在部分端点语义不同，见你 M6 结论） |
+| 返回 | `ModelInput` | `{"messages": list[Message], "tools": Sequence[Tool] \| None}`，可直接 `**` 展开 |
 
 ### 完整代码
 
 ```python
 """上下文组装：把 AgentState 拼成模型可直接消费的输入。"""
 
+from collections.abc import Sequence
 from typing import TypedDict
 
-from ..model import Message
+from ..model import Message, Tool
 from ._state import AgentState
 
 
@@ -218,14 +264,14 @@ class ModelInput(TypedDict):
     """`build_model_input` 的返回值：可直接作为关键字参数传给模型。"""
 
     messages: list[Message]
-    tools: list[dict] | None
+    tools: Sequence[Tool] | None
 
 
 def build_model_input(
     state: AgentState,
     *,
     system_prompt: str,
-    tools: list[dict] | None = None,
+    tools: Sequence[Tool] | None = None,
 ) -> ModelInput:
     """把会话状态组装成模型输入：三段式 messages + tools。
 
@@ -238,7 +284,7 @@ def build_model_input(
     Args:
         state: 会话状态；本函数**只读**，不修改它。
         system_prompt: 最终的系统提示文本；动态拼装（技能/工作区/中间件）由调用方负责。
-        tools: 工具 JSON schema 列表；没有工具时传 `None`（不要传空列表）。
+        tools: `model.Tool` 对象序列（如 `bridge.model_tools_for(toolkit)`）；没有工具时传 `None`。
 
     Returns:
         关键字参数字典，可直接 `await model(**out)`；也可 `await model.count_tokens(**out)`，
@@ -255,7 +301,7 @@ def build_model_input(
 
     messages.extend(state.context)
 
-    return {"messages": messages, "tools": tools}
+    return ModelInput(messages=messages, tools=tools)
 ```
 
 ---

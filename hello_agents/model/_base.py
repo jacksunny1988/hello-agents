@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -8,10 +9,11 @@ from typing import TypeVar
 
 from openai import AsyncOpenAI
 
+from ._formatter import to_openai_tools
 from ._registry import ModelConfig
 from ._response import ChatResponse, FinishedReason
 from ._tool import Tool, ToolChoice
-from .message import Message
+from .message import Message, TextBlock, ToolCallBlock, ToolResultBlock
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,50 @@ class ChatModelBase(ABC):
                     content=[], finished_reason=FinishedReason.INTERRUPTED
                 )
         return self._stream(messages, tools, tool_choice, response_format)
+
+    async def count_tokens(
+        self,
+        messages: list[Message],
+        tools: Sequence[Tool] | None = None,
+    ) -> int:
+        """粗估这次输入会消耗多少 token —— **只数真正会发出去的内容**。
+
+        用途：`hello_agents/state` 的压缩阈值判定与切分预算都建立在本估算之上。
+
+        口径（刻意粗，但**与出站同源**）：把会出站的字符串按顺序拼接，
+        取 UTF-8 字节数 ÷ 4 后四舍五入。
+
+        - 计入：`role`、`TextBlock.text`、`ToolCallBlock.name` /
+          `arguments`、`ToolResultBlock.output`，以及 tools 的 JSON schema；
+        - **不计**：`ThinkingBlock`（`to_openai_messages` 出站时丢弃它）、
+          各种 `id` / `index` / `timestamp`（出站不用）；
+        - 中文一字 3 字节、按 ÷4 折算约 0.75 token，而真实 tokenizer 多在
+          1 token/字左右，所以本估算整体**略偏小**——由调用方
+          `trigger_ratio < 1` 留出的余量吸收。
+
+        要更准就在 provider 子类里覆写：先用 `to_openai_messages` /
+        `to_openai_tools` 拿到出站形态，再用该厂商真实的 tokenizer 数。
+        做成 `async` 正是为了让「换成远端 tokenizer」不必改动任何调用点；
+        当前默认实现没有任何 I/O。
+        """
+        chunks: list[str] = []
+        for msg in messages:
+            chunks.append(msg.role.value)
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
+                elif isinstance(block, ToolCallBlock):
+                    chunks.append(block.name)
+                    chunks.append(block.arguments)
+                elif isinstance(block, ToolResultBlock):
+                    chunks.append(block.output)
+                # ThinkingBlock 不计：formatter 出站时会忽略它。
+
+        if tools:
+            # 复用出站同一个函数产出 schema，避免「估算口径」与「请求口径」漂移。
+            chunks.append(json.dumps(to_openai_tools(tools), ensure_ascii=False))
+
+        return int(len("".join(chunks).encode("utf-8")) / 4 + 0.5)
 
     async def _stream(
         self,

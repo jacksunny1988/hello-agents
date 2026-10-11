@@ -1,8 +1,12 @@
 """C1：上下文组装 build_model_input —— 三段式、引用透传、只读，以及与 formatter 的协议兼容（离线、确定性）"""
 
+import inspect
+from typing import get_type_hints
+
 import pytest
 
 from hello_agents.model import (
+    ChatModelBase,
     Message,
     Role,
     TextBlock,
@@ -10,7 +14,7 @@ from hello_agents.model import (
     ToolResultBlock,
 )
 from hello_agents.model._formatter import to_openai_messages
-from hello_agents.state import AgentState, build_model_input
+from hello_agents.state import AgentState, ModelInput, build_model_input
 
 SYSTEM_PROMPT = "你是一个严谨的编码助手，回答前先读文件确认事实。"
 
@@ -179,3 +183,40 @@ def test_append_tool_result_forms_tool_message_and_formatter_pairs():
         "content": "hello",
         "name": "read_file",
     }
+
+
+def test_model_input_contract_matches_both_model_entrypoints() -> None:
+    """C1 的 out 要能摊给 model 的两个入口：键集合 + 同名参数类型必须对齐。"""
+    call = inspect.signature(ChatModelBase.__call__)
+    count = inspect.signature(ChatModelBase.count_tokens)
+    build = inspect.signature(build_model_input)
+
+    # ① **out 能摊开的前提：ModelInput 的键集合
+    hints = get_type_hints(ModelInput)
+    assert set(hints) == {"messages", "tools"}
+
+    # ② 同名参数：类型与 __call__ 逐字一致（防「两边都没写注解」也判绿）
+    for name in ("messages", "tools"):
+        annotation = call.parameters[name].annotation
+        assert annotation is not inspect.Parameter.empty
+        assert count.parameters[name].annotation == annotation
+        assert hints[name] == annotation
+
+    # ③ 生产 out 的那个函数，tools 也必须同型——本次就是在这里收窄的
+    assert build.parameters["tools"].annotation == call.parameters["tools"].annotation
+    assert build.parameters["tools"].default is None
+    assert count.parameters["tools"].default is None
+
+
+def test_model_input_binds_to_both_entrypoints() -> None:
+    """行为版：真的把 out 摊给两个入口；键名不匹配时 bind 会抛 TypeError。"""
+    out = build_model_input(AgentState(), system_prompt="sp")
+    for target in (ChatModelBase.__call__, ChatModelBase.count_tokens):
+        bound = inspect.signature(target).bind(None, **out)
+        assert bound.arguments["messages"] is out["messages"]
+
+    # 负例：多一个键必须被拒——证明上面那条断言确实在检查键集合
+    with pytest.raises(TypeError):
+        inspect.signature(ChatModelBase.count_tokens).bind(
+            None, **out, tool_choice=None
+        )
